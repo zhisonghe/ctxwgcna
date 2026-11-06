@@ -47,13 +47,13 @@ per-context similarity ──► Fisher z, standardized ──► top-n contexts
 
 ## 1. Installation
 
-Requirements: Python ≥ 3.10 (developed and tested with 3.11), macOS or Linux.
+Requirements: Python 3.10–3.14 (the test suite passes on all five; 3.12 is a good default), macOS or Linux.
 
 ### With uv (recommended)
 
 ```bash
 cd /path/to/adapt_WGCNA
-uv venv --python 3.11 .venv
+uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[test]"
 source .venv/bin/activate
 ```
@@ -62,7 +62,7 @@ source .venv/bin/activate
 
 ```bash
 cd /path/to/adapt_WGCNA
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[test]"
 ```
@@ -80,8 +80,8 @@ overlapping submodules.
 ### Dependency notes
 | Package | Why | Note |
 |---|---|---|
-| `numpy`, `pandas`, `scipy` | core | Tested with numpy 2.4, scipy 1.17, and both pandas 2.3 and 3.1. |
-| `dynamicTreeCut==0.1.1` | dynamic hybrid tree cut | Pinned: verified to reproduce R `dynamicTreeCut::cutreeDynamic` exactly (with PAM off). |
+| `numpy`, `pandas`, `scipy` | core | Tested with numpy 2.2–2.5, scipy 1.15–1.18, pandas 2.3 and 3.1. |
+| `dynamicTreeCut==0.1.1` | dynamic hybrid tree cut | Pinned: verified to reproduce R `dynamicTreeCut::cutreeDynamic` exactly (with PAM off). The package is unmaintained; ctxwgcna patches its use of `scipy.stats.rankdata`, which broke with scipy 1.18 (see `modules._cutree_hybrid`). |
 | `anndata` | reading `.h5ad` files (optional) | `[anndata]` extra; AnnData objects are detected without importing it. Also in `[test]`. |
 | `scikit-learn`, `pytest` | tests only | installed by the `[test]` extra |
 | `matplotlib` | README figure only | installed by the `[docs]` extra; not needed for the analysis |

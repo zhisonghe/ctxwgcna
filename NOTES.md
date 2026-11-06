@@ -123,3 +123,18 @@ cut); Kimi brute-force checked shared/matched TOM and timed G=1000, K=300: suppo
 - CLI --power skips the scale-free scan.
 Docs: analytic calibration is approximate for spearman/bicor; store_max_mb note for K = 300.
 Demo unchanged after fixes (bias 0.0852, ARI 0.981). Tests: 29.
+
+## 2026-11-06 — Python versions and the scipy 1.18 break in dynamicTreeCut
+
+Fresh installs on Python 3.12–3.14 failed 6 tests: scipy 1.18 made `rankdata(method="ordinal")`
+return float64, and dynamicTreeCut 0.1.1 uses those ranks as array indices (IndexError). Python 3.11
+only worked because scipy 1.18 doesn't support 3.11, so pip installed 1.17. Fix:
+`modules._cutree_hybrid()` swaps in a rankdata that casts ordinal ranks back to int, inside the
+dynamicTreeCut module only. Verified: 33 tests pass on 3.10 (scipy 1.15), 3.11 (1.17), 3.12, 3.13
+and 3.14 (1.18); modules, submodule memberships, summary z, pooled baseline and dominance flags are
+identical between 3.11/scipy 1.17 and 3.13/scipy 1.18.
+dynamicTreeCut also applies `~` to Python bools (DeprecationWarning since 3.12, an error in 3.16).
+`~True` is -2, which is truthy, so `if ~DoMerge and nExternalSplits > 0` is wrong in that package,
+but the branch only runs with minExternalSplit, which ctxwgcna doesn't use; the warning is filtered.
+Before Python 3.16, vendor a fixed copy of the tree cut (check dynamicTreeCut's license first).
+README now recommends 3.12.

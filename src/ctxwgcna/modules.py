@@ -1,4 +1,6 @@
 """Step 5b: module detection and context-aware module summaries."""
+import warnings
+
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
@@ -7,6 +9,27 @@ from scipy.spatial.distance import squareform
 from .similarity import similarity_matrix
 
 UNASSIGNED = "M0"  # label of genes in no module (WGCNA's "grey")
+
+
+def _cutree_hybrid():
+    """dynamicTreeCut.cutreeHybrid, made compatible with current scipy and Python.
+
+    dynamicTreeCut 0.1.1 (unmaintained) uses scipy.stats.rankdata(..., method='ordinal') results as
+    array indices. scipy >= 1.18 returns them as floats, which numpy rejects as indices (IndexError);
+    the ordinal ranks are whole numbers, so casting them back to int restores the old behaviour
+    exactly. The patch is applied once, to dynamicTreeCut's own module namespace only.
+    """
+    import dynamicTreeCut.dynamicTreeCut as dtc
+    from scipy.stats import rankdata
+
+    if not getattr(dtc, "_ctxwgcna_patched", False):
+        def rankdata_int(a, method="average", **kwargs):
+            ranks = rankdata(a, method=method, **kwargs)
+            return ranks.astype(np.int64) if method == "ordinal" else ranks
+
+        dtc.rankdata = rankdata_int
+        dtc._ctxwgcna_patched = True
+    return dtc.cutreeHybrid
 
 
 def detect_modules(tom, genes, min_module_size=30, deep_split=2, **cutree_kwargs):
@@ -21,14 +44,18 @@ def detect_modules(tom, genes, min_module_size=30, deep_split=2, **cutree_kwargs
     Returns (labels, linkage): labels is a Series gene -> 'M1', 'M2', ... (M1 largest);
     'M0' = unassigned.
     """
-    from dynamicTreeCut import cutreeHybrid
+    cutreeHybrid = _cutree_hybrid()
 
     diss = 1.0 - np.asarray(tom, dtype=np.float64)  # no rounding: TOM can be ~1e-6 with weak signal
     np.fill_diagonal(diss, 0.0)
     Z = linkage(squareform(diss, checks=False), method="average")
     cutree_kwargs.setdefault("pamStage", False)
     cutree_kwargs.setdefault("verbose", 0)
-    res = cutreeHybrid(Z, diss, minClusterSize=min_module_size, deepSplit=deep_split, **cutree_kwargs)
+    with warnings.catch_warnings():
+        # dynamicTreeCut applies '~' to Python bools (deprecated in Python 3.12). The affected branch
+        # only runs with external splits (minExternalSplit), which ctxwgcna does not use.
+        warnings.filterwarnings("ignore", message="Bitwise inversion", category=DeprecationWarning)
+        res = cutreeHybrid(Z, diss, minClusterSize=min_module_size, deepSplit=deep_split, **cutree_kwargs)
     numbers = np.asarray(res["labels"], dtype=int)  # 0 = unassigned, 1 = largest module, ...
     return pd.Series([f"M{v}" for v in numbers], index=pd.Index(genes), name="module"), Z
 
