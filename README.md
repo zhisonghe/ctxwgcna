@@ -248,8 +248,8 @@ subs, mem = cw.split_modules()       # overlapping, context-defined submodules
 cw.module_context_profile()          # which contexts carry each module
 cw.module_context_coherence()        # direct per-context check of each module
 cw.membership_matrix()               # genes x submodules (bool)
-cw.support.pair_profile("GeneA", "GeneB")   # one pair's support in every context
-cw.support.pair("GeneA", "GeneB")           # its top-n supporting contexts
+cw.support.pair_profile("GeneA", "GeneB")   # one pair's support in every context (needs stored t)
+cw.support.pair("GeneA", "GeneB")           # its top-n supporting contexts (signed t, rank_stat)
 cw.context_eigengenes("M3", contexts=["sysA", "sysB"])   # eigengene within supporting contexts
 
 # baseline for comparison: standard WGCNA on pooled data
@@ -257,8 +257,32 @@ glob_modules, glob_power = global_wgcna(fc, power=12, min_module_size=30)
 ```
 
 `cw.run(power=None, min_module_size=30)` runs `compute_support → pick_power → build_network →
-find_modules` in one call. Each step can be re-run alone, e.g. `build_network(power=16)` then
-`find_modules()` without recomputing the support.
+find_modules` in one call (the power is picked unless given). Each step can be re-run alone, e.g.
+`build_network(power=16)` then `find_modules()` without recomputing the support. A step called
+before its prerequisites runs them first (e.g. `build_network()` on a fresh object computes the
+support and picks the power). `split_modules()` needs `find_modules()` first, and
+`membership_matrix()` needs `split_modules()`.
+
+#### Lower-level functions
+The steps are also available as plain functions, e.g. for custom pipelines:
+
+| Function | Module | What it does |
+|---|---|---|
+| `make_context_blocks(fc, obs, context_col)` | `ctxwgcna.data` | validate input, split rows into `ContextBlock`s |
+| `similarity_matrix(X, method)`, `fisher_z(S)` | `ctxwgcna.similarity` | one context's gene-gene similarity, Fisher z |
+| `standardized_z(X, method)`, `z_scale(n)` | `ctxwgcna.similarity` | t = arctanh(s)·√(n − 3) for one context; √(n − 3) |
+| `compute_support(blocks, ...)` | `ctxwgcna.support` | top-n contexts per pair and the calibrated summary (`ContextSupport`) |
+| `soft_context_weights(t, selection)` | `ctxwgcna.support` | per-edge soft context weights from (K, …) per-context t |
+| `adjacency_from_r`, `scale_free_table`, `pick_power`, `context_tom` | `ctxwgcna.network` | adjacency, power choice, context-restricted TOM (`DEFAULT_POWERS`: candidate powers) |
+| `detect_modules(tom, genes)`, `module_indices(modules)` | `ctxwgcna.modules` | tree cut; `{module: gene positions}` (M0 excluded) |
+| `module_context_profile`, `module_context_profile_soft`, `module_context_coherence`, `eigengene` | `ctxwgcna.modules` | module summaries |
+| `split_module(t_ctx)`, `split_modules(modules, get_t, contexts)` | `ctxwgcna.submodules` | overlapping split of one / every module |
+| `detect_dominant`, `drop_dominant` | `ctxwgcna.dominance` | dominant FC profiles |
+| `simulate_fc(...)` | `ctxwgcna.simulate` | synthetic data with known modules |
+
+The most used ones (`ContextWGCNA`, `global_wgcna`, `make_context_blocks`, `compute_support`,
+`similarity_matrix`, `fisher_z`, `adjacency_from_r`, `context_tom`, `scale_free_table`,
+`pick_power`, `detect_dominant`, `drop_dominant`) can be imported directly from `ctxwgcna`.
 
 ---
 
@@ -269,7 +293,11 @@ find_modules` in one call. Each step can be re-run alone, e.g. `build_network(po
 |---|---|---|
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
-| `min_obs` | `10` | Contexts with fewer observations are dropped. Raise it for condition contexts if correlations look noisy. |
+| `min_obs` | `10` | Contexts with fewer observations are dropped (must be ≥ 4). Raise it for condition contexts if correlations look noisy. |
+
+Input checks when the contexts are built: row (observation) and column (gene) labels must be unique,
+`obs` must contain every row of `fc` (it is reordered to match), and `fc` must not contain NaN or
+infinite values. Each raises a `ValueError` naming the problem.
 
 ### Similarity
 | Parameter | Default | Meaning / when to change |
@@ -296,7 +324,7 @@ contexts × 20 observations it is large (z ≈ 0.63, r ≈ 0.56). There calibrat
 | `network_type` | `"signed"` | `signed`: a = ((1 + r)/2)^β; negatively correlated genes are disconnected. `signed hybrid`: a = r^β for r > 0, else 0. `unsigned`: a = \|r\|^β; positively and negatively correlated genes can share a module. |
 | `power` (β) | scale-free pick | See "Choosing the power". |
 | `tom_mode` | `"matched"` | `matched`: a shared neighbour u counts for (i, j) only if i–u, u–j **and** i–j share a supporting context. `shared`: i–u and u–j must share a context. `standard`: ordinary WGCNA TOM (context-blind). |
-| `support_min_t` | `None` | Optionally count a top-n context as "supporting" in the TOM only if its standardized z ≥ this value. |
+| `support_min_t` | `None` | Optionally count a top-n context as "supporting" (in the TOM and in `module_context_profile(soft=False)`) only if its t ≥ this value. |
 
 #### Choosing the power
 `pick_power(powers=None, r2_cut=0.85, mean_cut=100)` returns the lowest power whose scale-free fit
@@ -316,7 +344,7 @@ contexts × 20 observations it is large (z ≈ 0.63, r ≈ 0.56). There calibrat
 ### Overlapping submodules — `split_modules(...)`
 For each hard module and each context, a gene is **active** if it has ≥ `min_partners`
 significantly correlated partners inside the module in that context (single-context
-standardized z ≥ `t_thr`). Contexts that activate similar gene sets are grouped. Each group becomes a
+t ≥ `t_thr`). Contexts that activate similar gene sets are grouped. Each group becomes a
 submodule of the genes active in at least half of its contexts. A gene active in several groups
 belongs to several submodules.
 
@@ -365,7 +393,8 @@ the other submodule members, over the submodule's contexts; a membership strengt
   parent are shared between context-specific programmes (e.g. a gene co-regulated with set A in
   system 6 and with set B in system 7).
 - **Pairs**: `cw.support.pair_profile(a, b)` shows a pair's similarity and weight in every context, and
-  whether that context was in its top-n.
+  whether that context was in its top-n. `cw.support.pair(a, b)` lists only the top-n contexts, with
+  the signed `t` and `rank_stat` (what they were ranked by: t, or |t| for unsigned networks).
 - **Eigengenes**: `cw.context_eigengenes(module, contexts=[...])` returns the module eigengene
   separately within each context (over that context's observations). Use the supporting contexts:
   a pooled eigengene dilutes local modules.
@@ -438,8 +467,8 @@ For context c with n_c observations and similarity s_c(i, j):
   where C_xy is the set of top-n contexts of pair (x, y). It is computed as Σ_k (A∘I_k)(A∘I_k)
   (∘ I_k for matched). The result stays in [0, 1] and never exceeds the standard TOM.
 - Modules: average-linkage clustering of 1 − TOM, then dynamic hybrid tree cut.
-- Soft context weight of an edge: w_ij^k = t_k⁺ / Σ_k t_k⁺. This is flat for globally co-expressed pairs
-  and peaked for local ones.
+- Soft context weight of an edge: w_ij^k = t_k⁺ / Σ_k t_k⁺ (|t_k| for unsigned networks). This is flat
+  for globally co-expressed pairs and peaked for local ones.
 - Submodules: see section 4.
 
 ---
@@ -464,16 +493,17 @@ For context c with n_c observations and similarity s_c(i, j):
 
 ```
 src/ctxwgcna/
-  data.py         contexts from fc + obs
+  data.py         step 1: input checks, contexts from fc + obs (ContextBlock)
   dominance.py    detect / drop dominant FC profiles
-  similarity.py   pearson / spearman / bicor / cosine, Fisher z
-  support.py      per-context statistics, top-n selection, summary, calibration, ContextSupport
-  network.py      adjacency, scale-free table, context-restricted TOM
-  modules.py      tree cut, context profile/coherence, eigengenes
+  similarity.py   pearson / spearman / bicor / cosine, Fisher z, standardized t per context
+  support.py      steps 2-4: top-n selection, summary, calibration, soft weights, ContextSupport
+  network.py      step 5a: adjacency, scale-free table and power, context-restricted TOM
+  modules.py      step 5b: tree cut, module index, context profiles (hard / soft), coherence, eigengenes
   submodules.py   overlapping context-defined split of each module
-  pipeline.py     ContextWGCNA class, global_wgcna baseline
+  pipeline.py     ContextWGCNA class (runs the steps), global_wgcna baseline
   simulate.py     synthetic FC data with global, local and overlapping modules
-scripts/run_ctxwgcna.py   command-line runner
+scripts/run_ctxwgcna.py   command-line runner (all ContextWGCNA options + dominance check)
+scripts/smoke_test.py     PyWGCNA reference run (not part of ctxwgcna; needs PyWGCNA)
 tests/test_core.py        unit + end-to-end tests (python -m pytest -q)
 NOTES.md                  development log: design decisions and verified findings
 ```
