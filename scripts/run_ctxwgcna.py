@@ -6,6 +6,9 @@ Examples
 # real data (FC matrix: rows = observations, columns = genes; obs table with the same row index)
 python scripts/run_ctxwgcna.py --fc fc.csv --obs obs.csv --context-col system --outdir results/
 
+# AnnData (.h5ad): a layer instead of .X, and only the genes flagged in a boolean .var column
+python scripts/run_ctxwgcna.py --h5ad data.h5ad --layer log2fc --var-subset highly_variable --outdir results/
+
 # demo on simulated data
 python scripts/run_ctxwgcna.py --simulate --outdir results_demo/
 
@@ -21,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ctxwgcna import ContextWGCNA, detect_dominant, drop_dominant, global_wgcna
+from ctxwgcna.data import as_frames
 
 
 def read_table(path, sep):
@@ -34,6 +38,10 @@ def parse_args(argv=None):
     io.add_argument("--fc", help="FC matrix (csv/tsv), rows = observations, columns = genes")
     io.add_argument("--obs", help="observation table (csv/tsv), same row index as --fc")
     io.add_argument("--transpose", action="store_true", help="--fc has genes as rows; transpose it")
+    io.add_argument("--h5ad", help="AnnData file (observations x genes) instead of --fc/--obs; obs = adata.obs")
+    io.add_argument("--layer", default=None, help="with --h5ad: use adata.layers[LAYER] instead of adata.X")
+    io.add_argument("--var-subset", default=None,
+                    help="with --h5ad: boolean adata.var column selecting the genes (e.g. highly_variable)")
     io.add_argument("--sep", default=None, help="column separator (default: from file extension)")
     io.add_argument("--simulate", action="store_true", help="use simulated demo data instead of --fc/--obs")
     io.add_argument("--outdir", required=True)
@@ -86,8 +94,11 @@ def parse_args(argv=None):
     o.add_argument("--save-matrices", action="store_true", help="save summary r, adjacency, TOM (npz)")
     o.add_argument("--seed", type=int, default=0)
     args = p.parse_args(argv)
-    if not args.simulate and not (args.fc and args.obs):
-        p.error("give --fc and --obs, or --simulate")
+    sources = [args.simulate, bool(args.fc or args.obs), bool(args.h5ad)]
+    if sum(sources) != 1 or (args.fc or args.obs) and not (args.fc and args.obs):
+        p.error("give exactly one input: --fc and --obs, --h5ad, or --simulate")
+    if (args.layer or args.var_subset) and not args.h5ad:
+        p.error("--layer and --var-subset need --h5ad")
     return args
 
 
@@ -96,6 +107,10 @@ def load_data(args):
     if args.simulate:
         from ctxwgcna.simulate import simulate_fc
         return simulate_fc(n_genes=1000, n_systems=20, n_conditions=300, seed=args.seed)
+    if args.h5ad:
+        import anndata  # optional dependency: pip install -e ".[anndata]"
+        fc, obs = as_frames(anndata.read_h5ad(args.h5ad), layer=args.layer, genes=args.var_subset)
+        return fc, obs, None
     fc = read_table(args.fc, args.sep)
     fc = fc.T if args.transpose else fc
     obs = read_table(args.obs, args.sep)

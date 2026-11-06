@@ -1,4 +1,4 @@
-"""Input validation and splitting of the data matrix into context blocks (step 1)."""
+"""Input handling (DataFrame or AnnData), validation, and splitting into context blocks (step 1)."""
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,6 +15,62 @@ class ContextBlock:
     @property
     def n_obs(self):
         return self.X.shape[0]
+
+
+def is_anndata(data):
+    """True for an AnnData object (checked by its attributes, so anndata need not be installed)."""
+    return all(hasattr(data, a) for a in ("X", "obs", "var", "obs_names", "var_names", "layers"))
+
+
+def as_frames(data, obs=None, layer=None, genes=None):
+    """Return (fc, obs) DataFrames from either a DataFrame + obs table or an AnnData object.
+
+    :param data: DataFrame (rows = observations, columns = genes), or AnnData (adata.X or a layer
+        holds observations x genes; adata.obs the annotations).
+    :param obs: observation table. Required for a DataFrame; for AnnData it defaults to adata.obs
+        (pass a table to override it).
+    :param layer: AnnData only: use adata.layers[layer] instead of adata.X.
+    :param genes: optional gene subset: a list of gene names, or (AnnData only) the name of a
+        boolean column of adata.var, e.g. 'highly_variable'. For AnnData the subset is taken before
+        the matrix is made dense.
+    """
+    if is_anndata(data):
+        adata = data
+        if genes is not None:
+            if isinstance(genes, str):
+                if genes not in adata.var.columns:
+                    raise ValueError(f"{genes!r} is not a column of adata.var")
+                keep = adata.var[genes].to_numpy(dtype=bool)
+            else:
+                missing = pd.Index(genes).difference(adata.var_names)
+                if len(missing):
+                    raise ValueError(f"genes not in adata.var_names, e.g. {list(missing[:5])}")
+                keep = adata.var_names.get_indexer(pd.Index(genes))
+            adata = adata[:, keep]
+        if layer is None:
+            X = adata.X
+        elif layer in adata.layers:
+            X = adata.layers[layer]
+        else:
+            raise ValueError(f"layer {layer!r} not found; available: {list(adata.layers.keys())}")
+        if X is None:
+            raise ValueError("adata.X is empty; pass layer=... to use one of adata.layers")
+        X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)  # sparse -> dense
+        fc = pd.DataFrame(X, index=pd.Index(adata.obs_names), columns=pd.Index(adata.var_names))
+        return fc, (adata.obs if obs is None else obs)
+
+    if layer is not None:
+        raise ValueError("layer is only used with AnnData input")
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("data must be a pandas DataFrame (observations x genes) or an AnnData object")
+    if genes is not None:
+        if isinstance(genes, str):
+            raise ValueError("genes as a column name needs AnnData input; pass a list of gene names")
+        missing = pd.Index(genes).difference(data.columns)
+        if len(missing):
+            raise ValueError(f"genes not in the columns of the data, e.g. {list(missing[:5])}")
+        data = data[list(genes)]
+    return data, obs
 
 
 def check_unique(fc, obs=None):
@@ -48,6 +104,8 @@ def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
     # --- validate ---
     if min_obs < 4:
         raise ValueError("min_obs must be >= 4 (Fisher z standard error is 1/sqrt(n - 3))")
+    if obs is None:
+        raise ValueError("obs (the observation table) is required")
     check_unique(fc, obs)
     if not fc.index.equals(obs.index):
         if set(fc.index) != set(obs.index):

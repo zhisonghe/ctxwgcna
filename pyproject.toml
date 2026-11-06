@@ -11,7 +11,8 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "dynamicTreeCut==0.1.1"]
 
 [project.optional-dependencies]
-test = ["pytest", "scikit-learn"]
+test = ["pytest", "scikit-learn", "anndata"]
+anndata = ["anndata"]
 docs = ["matplotlib"]
 
 [tool.setuptools.packages.find]

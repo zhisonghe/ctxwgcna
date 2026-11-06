@@ -412,3 +412,70 @@ def test_cli_given_power_skips_scan(tmp_path):
     spec.loader.exec_module(mod)
     mod.main(["--simulate", "--power", "12", "--no-split", "--outdir", str(tmp_path)])
     assert (tmp_path / "modules.csv").exists() and not (tmp_path / "soft_threshold.csv").exists()
+
+
+# --- AnnData input -----------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def adata_example():
+    anndata = pytest.importorskip("anndata")
+    from scipy import sparse
+    fc, obs, truth = simulate_fc(n_genes=320, n_systems=8, n_conditions=40, seed=7)
+    ad = anndata.AnnData(X=np.zeros(fc.shape), obs=obs.copy(),
+                         var=pd.DataFrame({"keep": np.arange(fc.shape[1]) < 150}, index=fc.columns))
+    ad.layers["log2fc"] = sparse.csr_matrix(fc.to_numpy())  # sparse layer, X deliberately different
+    return ad, fc, obs
+
+
+def test_anndata_input_matches_dataframe(adata_example):
+    ad, fc, obs = adata_example
+    a = ContextWGCNA(ad, layer="log2fc").compute_support()
+    b = ContextWGCNA(fc, obs).compute_support()
+    np.testing.assert_array_equal(a.z, b.z)
+    assert list(a.genes) == list(fc.columns)
+    # gene subset by boolean .var column, and by list of names
+    sub = ContextWGCNA(ad, layer="log2fc", genes="keep")
+    assert list(sub.genes) == list(fc.columns[:150])
+    assert list(ContextWGCNA(ad, layer="log2fc", genes=["g0003", "g0001"]).genes) == ["g0003", "g0001"]
+    labels, _ = global_wgcna(ad, layer="log2fc", power=12, min_module_size=20)
+    assert list(labels.index) == list(fc.columns)
+
+
+def test_anndata_errors(adata_example):
+    ad, fc, obs = adata_example
+    with pytest.raises(ValueError, match="layer 'nope' not found"):
+        ContextWGCNA(ad, layer="nope")
+    with pytest.raises(ValueError, match="only used with AnnData"):
+        ContextWGCNA(fc, obs, layer="log2fc")
+    with pytest.raises(ValueError, match="obs .* is required"):
+        ContextWGCNA(fc)
+    with pytest.raises(ValueError, match="not a column of adata.var"):
+        ContextWGCNA(ad, layer="log2fc", genes="nope")
+
+
+def test_anndata_dominance(adata_example):
+    ad, fc, obs = adata_example
+    ad = ad.copy()
+    X = ad.layers["log2fc"].toarray()
+    first = ad.obs_names[ad.obs["system"] == "sys0"][0]
+    X[ad.obs_names.get_loc(first), :120] += 15  # one broad, dominant profile
+    ad.layers["log2fc"] = X
+    rows, _ = detect_dominant(ad, layer="log2fc", verbose=False)
+    assert rows.index[rows["dominant"]].tolist() == [first]
+    kept = drop_dominant(ad, rows=rows)
+    assert kept.n_obs == ad.n_obs - 1 and first not in kept.obs_names
+
+
+def test_cli_h5ad(adata_example, tmp_path):
+    import importlib.util, os
+    ad, fc, obs = adata_example
+    path = tmp_path / "data.h5ad"
+    ad.write_h5ad(path)
+    spec = importlib.util.spec_from_file_location(
+        "run_ctxwgcna", os.path.join(os.path.dirname(__file__), "..", "scripts", "run_ctxwgcna.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = tmp_path / "out"
+    mod.main(["--h5ad", str(path), "--layer", "log2fc", "--var-subset", "keep", "--power", "12",
+              "--min-module-size", "20", "--no-split", "--outdir", str(out)])
+    assert len(pd.read_csv(out / "modules.csv", index_col=0)) == 150

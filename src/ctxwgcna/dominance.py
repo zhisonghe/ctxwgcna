@@ -25,7 +25,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .data import check_unique
+from .data import as_frames, check_unique, is_anndata
 
 MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
 
@@ -106,12 +106,14 @@ def _summarise_by_label(rows):
     return summary.sort_values(["n_dominant", "max_fold"], ascending=False)
 
 
-def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fold=5.0, min_z=4.0,
-                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, verbose=True):
+def detect_dominant(fc, obs=None, context_col="system", label_col="condition", min_fold=5.0, min_z=4.0,
+                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, verbose=True, layer=None, genes=None):
     """Flag dominant FC profiles.
 
-    :param fc: DataFrame, rows = observations (FC profiles), columns = genes.
+    :param fc: DataFrame, rows = observations (FC profiles), columns = genes; or AnnData.
     :param obs: DataFrame with the same index, holding `context_col` (and optionally `label_col`).
+        Defaults to adata.obs for AnnData input.
+    :param layer, genes: AnnData layer and gene subset, as in ContextWGCNA.
     :param context_col: rows are compared within groups of this column (e.g. each system).
     :param label_col: column used to summarise across contexts (e.g. condition); may be None.
     :param min_fold: magnitude: the row's sum of squared FC must be >= min_fold x the context median.
@@ -129,6 +131,9 @@ def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fo
       summary  per label (if label_col given): n_contexts, n_dominant, frac_dominant, max_fold,
                median_fold, max_frac_extreme; sorted by n_dominant then max_fold
     """
+    fc, obs = as_frames(fc, obs, layer=layer, genes=genes)
+    if obs is None:
+        raise ValueError("obs (the observation table) is required")
     check_unique(fc, obs)
     for col in (context_col, label_col):
         if col is not None and col not in obs.columns:
@@ -169,7 +174,16 @@ def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fo
     return rows, summary
 
 
-def drop_dominant(fc, obs, rows):
-    """Remove the rows flagged as dominant; returns (fc, obs) without them, in fc's row order."""
+def drop_dominant(fc, obs=None, rows=None):
+    """Remove the observations flagged as dominant in `rows` (from detect_dominant).
+
+    DataFrame input: drop_dominant(fc, obs, rows) returns (fc, obs) without them, in fc's row order.
+    AnnData input:   drop_dominant(adata, rows=rows) returns a filtered copy of the AnnData.
+    """
+    if rows is None:
+        raise ValueError("pass rows=, the first table returned by detect_dominant")
+    if is_anndata(fc):
+        dominant = rows["dominant"].reindex(fc.obs_names, fill_value=False).to_numpy(dtype=bool)
+        return fc[~dominant].copy()
     kept = fc.index[~rows.loc[fc.index, "dominant"].to_numpy()]
     return fc.loc[kept], obs.loc[kept]

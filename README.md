@@ -70,7 +70,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 29 tests, a few seconds
+python -m pytest -q                      # 33 tests, a few seconds
 python scripts/run_ctxwgcna.py --simulate --power 12 --min-module-size 20 --outdir results_demo/
 ```
 
@@ -82,6 +82,7 @@ overlapping submodules.
 |---|---|---|
 | `numpy`, `pandas`, `scipy` | core | Tested with numpy 2.4, scipy 1.17, and both pandas 2.3 and 3.1. |
 | `dynamicTreeCut==0.1.1` | dynamic hybrid tree cut | Pinned: verified to reproduce R `dynamicTreeCut::cutreeDynamic` exactly (with PAM off). |
+| `anndata` | reading `.h5ad` files (optional) | `[anndata]` extra; AnnData objects are detected without importing it. Also in `[test]`. |
 | `scikit-learn`, `pytest` | tests only | installed by the `[test]` extra |
 | `matplotlib` | README figure only | installed by the `[docs]` extra; not needed for the analysis |
 
@@ -94,8 +95,10 @@ matching PyWGCNA's output to 1e-13. `external/PyWGCNA/` (a source clone) and
 
 ## 2. Preparing the input
 
-You need two tables with the **same row index**. The method was designed for fold-change (FC) data
-and the examples below use FC, but any samples × genes matrix works, as in standard WGCNA (see
+You need a data matrix (observations × genes) and an observation table with the **same row
+index**, either as two pandas tables or as one AnnData object (see [AnnData input](#anndata-input)).
+The method was designed for fold-change (FC) data and the examples below use FC, but any samples ×
+genes matrix works, as in standard WGCNA (see
 [Using expression data instead of FC](#using-expression-data-instead-of-fc)). The argument is still
 called `fc` (`--fc` in the script).
 
@@ -103,9 +106,9 @@ called `fc` (`--fc` in the script).
 
 | | GeneA | GeneB | … |
 |---|---|---|---|
-| `sysA|cond001` | 0.83 | -0.12 | … |
-| `sysA|cond002` | … | | |
-| `sysB|cond001` | … | | |
+| `sysA\|cond001` | 0.83 | -0.12 | … |
+| `sysA\|cond002` | … | | |
+| `sysB\|cond001` | … | | |
 
 One row is one FC profile (one condition in one system, vs. that system's control). If your file
 has genes as rows, transpose it (`fc.T`, or `--transpose` in the script).
@@ -114,8 +117,33 @@ has genes as rows, transpose it (`fc.T`, or `--transpose` in the script).
 
 | | system | condition |
 |---|---|---|
-| `sysA|cond001` | sysA | cond001 |
-| `sysA|cond002` | sysA | cond002 |
+| `sysA\|cond001` | sysA | cond001 |
+| `sysA\|cond002` | sysA | cond002 |
+
+### AnnData input
+An AnnData object can be passed directly wherever `fc` is expected (`ContextWGCNA`, `global_wgcna`,
+`detect_dominant`, `drop_dominant`). Its observations × genes matrix is the data, and `adata.obs`
+is the observation table, so `obs` can be left out.
+
+```python
+import anndata
+from ctxwgcna import ContextWGCNA
+
+adata = anndata.read_h5ad("data.h5ad")
+cw = ContextWGCNA(adata, layer="log2fc", genes="highly_variable", context_col="system")
+```
+
+| Option | Meaning |
+|---|---|
+| `layer` | Use `adata.layers[layer]` instead of `adata.X` (e.g. a layer holding log2 FC). |
+| `genes` | Gene subset: a list of gene names, or the name of a boolean `adata.var` column such as `highly_variable`. The subset is taken before the matrix is made dense. |
+| `obs` | Optional; overrides `adata.obs`. |
+
+Sparse matrices are converted to dense, so subset the genes for large data (cost grows with
+genes²). `obs_names` and `var_names` must be unique (`adata.var_names_make_unique()`); `obs`
+columns may be categorical. Reading `.h5ad` files needs `anndata` (`pip install -e ".[anndata]"`);
+passing an AnnData object needs nothing extra. On the command line use `--h5ad data.h5ad`
+(optionally `--layer` and `--var-subset`) instead of `--fc`/`--obs`.
 
 ### Recommendations
 - **Values:** log2 FC. Prefer shrunken estimates (e.g. DESeq2 `lfcShrink`, apeglm/ashr) so noisy
@@ -175,6 +203,10 @@ rows, summary = detect_dominant(fc, obs, context_col="system", label_col="condit
 print(summary.head(10))          # per condition: in how many systems it is dominant
 fc_clean, obs_clean = drop_dominant(fc, obs, rows)
 cw = ContextWGCNA(fc_clean, obs_clean, context_col="system")
+
+# with AnnData: drop_dominant returns a filtered copy
+rows, summary = detect_dominant(adata, layer="log2fc")
+adata_clean = drop_dominant(adata, rows=rows)
 ```
 or with the script: `--exclude-dominant` (`--detect-dominant` only reports).
 
@@ -228,6 +260,14 @@ python scripts/run_ctxwgcna.py \
     --global-baseline
 ```
 
+From an AnnData file instead:
+
+```bash
+python scripts/run_ctxwgcna.py \
+    --h5ad data.h5ad --layer log2fc --var-subset highly_variable \
+    --context-col system --exclude-dominant --outdir results/
+```
+
 `python scripts/run_ctxwgcna.py -h` lists all options; they map one-to-one onto the parameters in
 section 4. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
 
@@ -257,6 +297,7 @@ fc  = pd.read_csv("fc.csv", index_col=0)     # observations x genes
 obs = pd.read_csv("obs.csv", index_col=0)    # same index; has a 'system' column
 
 cw = ContextWGCNA(fc, obs, context_col="system")   # defaults: pearson, top_n=3, signed, matched TOM
+# or from AnnData: ContextWGCNA(adata, layer="log2fc", genes="highly_variable", context_col="system")
 
 cw.compute_support()                 # steps 1-4
 cw.pick_power()                      # scale-free table -> cw.sft, cw.power
@@ -289,6 +330,7 @@ The steps are also available as plain functions, e.g. for custom pipelines:
 
 | Function | Module | What it does |
 |---|---|---|
+| `as_frames(data, obs, layer, genes)` | `ctxwgcna.data` | DataFrame or AnnData input → (`fc`, `obs`) DataFrames |
 | `make_context_blocks(fc, obs, context_col)` | `ctxwgcna.data` | validate input, split rows into `ContextBlock`s |
 | `similarity_matrix(X, method)`, `fisher_z(S)` | `ctxwgcna.similarity` | one context's gene-gene similarity, Fisher z |
 | `standardized_z(X, method)`, `z_scale(n)` | `ctxwgcna.similarity` | t = arctanh(s)·√(n − 3) for one context; √(n − 3) |
@@ -301,7 +343,7 @@ The steps are also available as plain functions, e.g. for custom pipelines:
 | `detect_dominant`, `drop_dominant` | `ctxwgcna.dominance` | dominant FC profiles |
 | `simulate_fc(...)` | `ctxwgcna.simulate` | synthetic data with known modules |
 
-The most used ones (`ContextWGCNA`, `global_wgcna`, `make_context_blocks`, `compute_support`,
+The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_blocks`, `compute_support`,
 `similarity_matrix`, `fisher_z`, `adjacency_from_r`, `context_tom`, `scale_free_table`,
 `pick_power`, `detect_dominant`, `drop_dominant`) can be imported directly from `ctxwgcna`.
 
@@ -312,6 +354,9 @@ The most used ones (`ContextWGCNA`, `global_wgcna`, `make_context_blocks`, `comp
 ### Contexts — `ContextWGCNA(...)`
 | Parameter | Default | Meaning / when to change |
 |---|---|---|
+| `fc` / `obs` | | The data: a DataFrame plus observation table, or an AnnData object (then `obs` defaults to `adata.obs`). |
+| `layer` | `None` | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
+| `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
 | `min_obs` | `10` | Contexts with fewer observations are dropped (must be ≥ 4). Raise it for condition contexts if correlations look noisy. |
@@ -514,7 +559,7 @@ For context c with n_c observations and similarity s_c(i, j):
 
 ```
 src/ctxwgcna/
-  data.py         step 1: input checks, contexts from fc + obs (ContextBlock)
+  data.py         step 1: DataFrame / AnnData input, input checks, contexts (ContextBlock)
   dominance.py    detect / drop dominant FC profiles
   similarity.py   pearson / spearman / bicor / cosine, Fisher z, standardized t per context
   support.py      steps 2-4: top-n selection, summary, calibration, soft weights, ContextSupport

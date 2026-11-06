@@ -5,7 +5,7 @@ import pandas as pd
 from . import modules as _mod
 from . import network as _net
 from . import submodules as _sub
-from .data import make_context_blocks
+from .data import as_frames, make_context_blocks
 from .similarity import similarity_matrix, standardized_z
 from .support import compute_support, soft_context_weights
 
@@ -22,10 +22,16 @@ class ContextWGCNA:
       then optionally   split_modules(): overlapping, context-defined submodules per module
 
     Typical use:  cw = ContextWGCNA(fc, obs); cw.run(); cw.split_modules()
+             or:  cw = ContextWGCNA(adata, layer="log2fc", genes="highly_variable")
     Each step can also be called on its own; missing earlier steps are run automatically.
 
-    :param fc: DataFrame, rows = observations (FC profiles or samples), columns = genes.
-    :param obs: DataFrame indexed like fc with context annotations.
+    :param fc: the data: a DataFrame (rows = observations, i.e. FC profiles or samples; columns =
+        genes), or an AnnData object (observations x genes).
+    :param obs: DataFrame indexed like fc with context annotations. Required for a DataFrame;
+        for AnnData it defaults to adata.obs.
+    :param layer: AnnData only: use adata.layers[layer] instead of adata.X.
+    :param genes: optional gene subset: a list of gene names, or (AnnData only) the name of a boolean
+        adata.var column such as 'highly_variable'. Cost grows with genes^2, so subset large data.
     :param network_type: 'signed' (default), 'signed hybrid' or 'unsigned'. Determines the
         top-n selection rule unless `selection` is given ('positive' for signed types,
         'absolute' for unsigned).
@@ -35,14 +41,15 @@ class ContextWGCNA:
     See README.md section 4 for all parameters.
     """
 
-    def __init__(self, fc, obs, context_col="system", contexts=None, similarity="pearson", top_n=3,
+    def __init__(self, fc, obs=None, context_col="system", contexts=None, similarity="pearson", top_n=3,
                  network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
                  tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
-                 store_context_t="auto", store_max_mb=2048):
+                 store_context_t="auto", store_max_mb=2048, layer=None, genes=None):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
-        # --- settings ---
-        self.fc, self.obs = fc, obs
+        # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
+        fc, obs = as_frames(fc, obs, layer=layer, genes=genes)
+        self.fc, self.obs, self.layer = fc, obs, layer
         self.genes = pd.Index(fc.columns)
         self.context_col = context_col
         self.similarity = similarity
@@ -193,11 +200,13 @@ class ContextWGCNA:
 
 
 def global_wgcna(fc, similarity="pearson", network_type="signed", power=None, powers=None,
-                 min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100):
+                 min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None):
     """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
 
-    Returns (module labels, power used).
+    fc is a DataFrame (observations x genes) or AnnData (with optional layer / genes, as in
+    ContextWGCNA). Returns (module labels, power used).
     """
+    fc, _ = as_frames(fc, None, layer=layer, genes=genes)
     r = similarity_matrix(fc.to_numpy(), similarity)
     if power is None:
         sft = _net.scale_free_table(r, _net.DEFAULT_POWERS if powers is None else powers, network_type)
