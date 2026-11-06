@@ -36,6 +36,8 @@ class ContextSupport:
     bias: object  # float or (G, G) array subtracted from z_raw
     null_sd: float  # spread of the null summary (for reference)
     t_all: np.ndarray = None  # (K, G, G) float32 signed standardized z per context, if stored
+    top_t_signed: np.ndarray = None  # (G, G, top_n) signed t_c of the selected contexts
+    # (only stored for selection='absolute'; for 'positive' it equals top_t)
 
     @property
     def r(self):
@@ -83,12 +85,14 @@ class ContextSupport:
         i, j = self.genes.get_loc(gene_a), self.genes.get_loc(gene_b)
         idx = self.top_idx[i, j]
         s = np.sqrt(np.maximum(self.n_obs[idx] - 3, 1))
+        t = (self.top_t if self.top_t_signed is None else self.top_t_signed)[i, j]
         return pd.DataFrame({
             "context": [self.contexts[k] for k in idx],
             "n_obs": self.n_obs[idx],
-            "t": self.top_t[i, j],
-            "z": self.top_t[i, j] / s,
-            "similarity": np.tanh(self.top_t[i, j] / s),
+            "t": t,  # signed
+            "rank_stat": self.top_t[i, j],  # what the contexts were ranked by (|t| if absolute)
+            "z": t / s,
+            "similarity": np.tanh(t / s),
         })
 
     def context_matrix(self, rank=0):
@@ -103,16 +107,21 @@ def _top_n_stream(blocks, method, top_n, selection, chunk_bytes, rng=None, store
     If rng is given, each gene's observations are permuted independently within each context
     (null: no gene-gene association, gene marginals preserved).
     If store is a (K, G, G) array, the signed standardized z of every context is written into it.
+    Returns (top_key, top_idx, top_signed); top_signed is the signed t of the selected contexts for
+    selection='absolute', else None (it equals top_key).
     """
     K = len(blocks)
     G = blocks[0].X.shape[1]
     top_key = np.full((G, G, top_n), -np.inf, dtype=np.float32)
     top_idx = np.full((G, G, top_n), -1, dtype=np.int16)
+    absolute = selection == "absolute"
+    top_sgn = np.zeros((G, G, top_n), dtype=np.float32) if absolute else None
     per_chunk = max(1, int(chunk_bytes // (G * G * 4)))
 
     for start in range(0, K, per_chunk):
         ks = list(range(start, min(K, start + per_chunk)))
         keys = np.empty((G, G, len(ks)), dtype=np.float32)
+        sgn = np.empty((G, G, len(ks)), dtype=np.float32) if absolute else None
         for j, k in enumerate(ks):
             X = blocks[k].X
             if rng is not None:
@@ -120,16 +129,21 @@ def _top_n_stream(blocks, method, top_n, selection, chunk_bytes, rng=None, store
             t = fisher_z(similarity_matrix(X, method)) * np.sqrt(max(X.shape[0] - 3, 1))
             if store is not None:
                 store[k] = t
-            keys[..., j] = np.abs(t) if selection == "absolute" else t
+            keys[..., j] = np.abs(t) if absolute else t
+            if absolute:
+                sgn[..., j] = t
         cand_key = np.concatenate([top_key, keys], axis=-1)
         cand_idx = np.concatenate(
             [top_idx, np.broadcast_to(np.asarray(ks, dtype=np.int16), (G, G, len(ks)))], axis=-1)
         part = np.argpartition(-cand_key, top_n - 1, axis=-1)[..., :top_n]
         top_key = np.take_along_axis(cand_key, part, axis=-1)
         top_idx = np.take_along_axis(cand_idx, part, axis=-1)
+        if absolute:
+            top_sgn = np.take_along_axis(np.concatenate([top_sgn, sgn], axis=-1), part, axis=-1)
 
     order = np.argsort(-top_key, axis=-1, kind="stable")
-    return np.take_along_axis(top_key, order, axis=-1), np.take_along_axis(top_idx, order, axis=-1)
+    take = lambda a: None if a is None else np.take_along_axis(a, order, axis=-1)
+    return take(top_key), take(top_idx), take(top_sgn)
 
 
 def _summarize(top_key, top_idx, n_obs, weighting):
@@ -139,14 +153,25 @@ def _summarize(top_key, top_idx, n_obs, weighting):
     return (w * zsel).sum(axis=-1) / w.sum(axis=-1)
 
 
-def _analytic_null(n_obs, top_n, selection, weighting, n_sim, rng):
-    """Null summary assuming independent contexts and t_c ~ N(0, 1) (valid for centred methods)."""
+def _analytic_null(n_obs, top_n, selection, weighting, n_sim, rng, chunk=20_000):
+    """Null summary assuming independent contexts and t_c ~ N(0, 1) (valid for centred methods).
+
+    Simulated in chunks of `chunk` draws so memory stays ~chunk x K x 8 bytes (16 MB per 100 contexts).
+    """
     K = len(n_obs)
-    t = rng.standard_normal((n_sim, K))
-    key = np.abs(t) if selection == "absolute" else t
-    idx = np.argpartition(-key, top_n - 1, axis=1)[:, :top_n]
-    zsum = _summarize(np.take_along_axis(key, idx, axis=1), idx, n_obs, weighting)
-    return float(zsum.mean()), float(zsum.std())
+    total, total2, done = 0.0, 0.0, 0
+    while done < n_sim:
+        m = min(chunk, n_sim - done)
+        t = rng.standard_normal((m, K))
+        if selection == "absolute":
+            np.abs(t, out=t)
+        idx = np.argpartition(-t, top_n - 1, axis=1)[:, :top_n]
+        zsum = _summarize(np.take_along_axis(t, idx, axis=1), idx, n_obs, weighting)
+        total += zsum.sum()
+        total2 += (zsum ** 2).sum()
+        done += m
+    mean = total / n_sim
+    return float(mean), float(np.sqrt(max(total2 / n_sim - mean ** 2, 0.0)))
 
 
 def compute_support(blocks, method="pearson", top_n=3, selection="positive", weighting="n",
@@ -178,8 +203,12 @@ def compute_support(blocks, method="pearson", top_n=3, selection="positive", wei
         raise ValueError(f"top_n must be between 1 and the number of contexts ({K})")
     if K > np.iinfo(np.int16).max:
         raise ValueError("too many contexts for int16 context ids")
+    if calibrate == "permutation" and int(n_perm) < 1:
+        raise ValueError("n_perm must be >= 1 for calibrate='permutation'")
 
     n_obs = np.array([b.n_obs for b in blocks])
+    if n_obs.min() < 4:
+        raise ValueError("every context needs >= 4 observations (Fisher z standard error 1/sqrt(n - 3))")
     chunk_bytes = chunk_mb * 2 ** 20
     rng = np.random.default_rng(seed)
 
@@ -192,7 +221,7 @@ def compute_support(blocks, method="pearson", top_n=3, selection="positive", wei
                   "they will be recomputed for module genes when needed.")
     t_all = np.empty((K, G, G), dtype=np.float32) if store_context_t else None
 
-    top_key, top_idx = _top_n_stream(blocks, method, top_n, selection, chunk_bytes, store=t_all)
+    top_key, top_idx, top_sgn = _top_n_stream(blocks, method, top_n, selection, chunk_bytes, store=t_all)
     z_raw = _summarize(top_key, top_idx, n_obs, weighting)
 
     if calibrate == "none":
@@ -205,7 +234,7 @@ def compute_support(blocks, method="pearson", top_n=3, selection="positive", wei
     else:
         acc, acc2 = np.zeros_like(z_raw), np.zeros_like(z_raw)
         for _ in range(n_perm):
-            nk, ni = _top_n_stream(blocks, method, top_n, selection, chunk_bytes, rng=rng)
+            nk, ni, _ = _top_n_stream(blocks, method, top_n, selection, chunk_bytes, rng=rng)
             zn = _summarize(nk, ni, n_obs, weighting)
             acc += zn
             acc2 += zn ** 2
@@ -227,4 +256,5 @@ def compute_support(blocks, method="pearson", top_n=3, selection="positive", wei
         contexts=[b.name for b in blocks], n_obs=n_obs, top_n=top_n, selection=selection,
         weighting=weighting, method=method, top_idx=top_idx, top_t=top_key,
         z_raw=z_raw, z=z, calibrate=calibrate, bias=bias, null_sd=null_sd, t_all=t_all,
+        top_t_signed=top_sgn,
     )

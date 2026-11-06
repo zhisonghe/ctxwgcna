@@ -50,7 +50,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 19 tests, a few seconds
+python -m pytest -q                      # 29 tests, a few seconds
 python scripts/run_ctxwgcna.py --simulate --power 12 --min-module-size 20 --outdir results_demo/
 ```
 
@@ -199,7 +199,7 @@ Outputs in `results/`:
 | `membership_matrix.csv` | genes × submodules, 0/1 |
 | `module_context_profile.csv` | modules × contexts: share of each module's connectivity supported by each context |
 | `module_context_coherence.csv` | modules × contexts: mean within-module similarity in each context |
-| `soft_threshold.csv` | scale-free fit and connectivity for each candidate power |
+| `soft_threshold.csv` | scale-free fit and connectivity for each candidate power (not written when `--power` is given) |
 | `global_modules.csv` | standard pooled WGCNA modules (with `--global-baseline`) |
 | `matrices.npz` | summary r, adjacency, TOM (with `--save-matrices`) |
 | `dominance_rows.csv`, `dominance_summary.csv` | dominant FC profiles (with `--detect-dominant` / `--exclude-dominant`) |
@@ -260,9 +260,9 @@ find_modules` in one call. Each step can be re-run alone, e.g. `build_network(po
 |---|---|---|
 | `top_n` | `3` | Number of best contexts summarized per pair. This sets the **minimum breadth of support** for an edge: `top_n=1` means "strong in any single context" and is noisiest; `2`–`3` is recommended. With K contexts, `top_n ≈ K` approaches ordinary pooled correlation. |
 | `weighting` | `"n"` | Weight of each selected context in the summary: `n` = by n_obs − 3 (pooled Fisher z); `equal` = plain mean. |
-| `calibrate` | `"analytic"` | Removes the optimism of picking the best n of K: `analytic` assumes independent contexts and a zero null mean (fine for pearson/spearman/bicor; fast). `permutation` permutes each gene within each context `n_perm` times; required for `cosine`, and safer if contexts are strongly dependent. `none` skips it. |
+| `calibrate` | `"analytic"` | Removes the optimism of picking the best n of K: `analytic` assumes independent contexts and that t = z·√(n_c−3) is standard normal under the null: exact in large samples for pearson, an approximation for spearman/bicor (use `permutation` there when the exact null matters); fast. `permutation` permutes each gene within each context `n_perm` times; required for `cosine`, and safer if contexts are strongly dependent. `none` skips it. |
 | `n_perm` | `10` | Permutations for `calibrate="permutation"`. |
-| `selection` | auto | `positive` (rank by signed z) for signed networks; `absolute` for unsigned. Set only to override. |
+| `selection` | auto | `positive` (rank by signed t = z·√(n_c−3)) for signed networks; `absolute` for unsigned. Set only to override. |
 | `store_context_t` / `store_max_mb` | `"auto"` / `2048` | Keep all per-context statistics (K × G² × 4 bytes) for soft context weights and module splitting. If they exceed `store_max_mb`, they are recomputed for module genes when needed (slower, same result). |
 
 How big is the calibration? `cw.support.bias` is the amount subtracted (Fisher z). For 20
@@ -390,7 +390,10 @@ Measured on simulated data (1,000 genes, 20 systems × 300 conditions, laptop):
 
 Scaling (G genes, K contexts, n top-n):
 - Memory: stored per-context statistics K·G²·4 bytes (1,000 genes × 20 contexts: 80 MB; × 300
-  contexts: 1.2 GB), plus about 10 G×G float64 matrices (1,000 genes: ~80 MB; 5,000 genes: ~2 GB).
+  contexts: 1.2 GB, stored by default since `store_max_mb=2048`; on a small machine pass
+  `store_max_mb=1024` so they are recomputed for module genes instead), plus about 10 G×G float64
+  matrices (1,000 genes: ~80 MB; 5,000 genes: ~2 GB). Analytic calibration is simulated in chunks
+  (~16 MB per 100 contexts).
 - Time: TOM needs K matrix products of size G (fine up to several thousand genes); permutation
   calibration multiplies the support step by `n_perm`.
 

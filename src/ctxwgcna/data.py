@@ -16,6 +16,15 @@ class ContextBlock:
         return self.X.shape[0]
 
 
+def check_unique(fc, obs=None):
+    """Raise if observation (row) or gene (column) labels are duplicated."""
+    for what, idx in (("fc row (observation)", fc.index), ("fc column (gene)", fc.columns)) + (
+            (("obs row", obs.index),) if obs is not None else ()):
+        if not idx.is_unique:
+            dup = list(idx[idx.duplicated()].unique()[:5])
+            raise ValueError(f"duplicated {what} labels, e.g. {dup}; labels must be unique")
+
+
 def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
     """Group the rows of `fc` by `obs[context_col]`.
 
@@ -24,8 +33,11 @@ def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
     :param context_col: column of `obs` defining the contexts (e.g. 'system' or 'condition').
         Within a context, similarities are computed across its observations.
     :param contexts: optional subset (list) of context names to use.
-    :param min_obs: contexts with fewer observations are dropped (with a message).
+    :param min_obs: contexts with fewer observations are dropped (with a message); must be >= 4.
     """
+    if min_obs < 4:
+        raise ValueError("min_obs must be >= 4 (Fisher z standard error is 1/sqrt(n - 3))")
+    check_unique(fc, obs)
     if not fc.index.equals(obs.index):
         if set(fc.index) != set(obs.index):
             raise ValueError("fc and obs must have the same row index (observations)")
@@ -34,6 +46,8 @@ def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
         raise ValueError(f"{context_col!r} is not a column of obs")
     if fc.isna().to_numpy().any():
         raise ValueError("fc contains NaN; impute or filter before building contexts")
+    if not np.isfinite(fc.to_numpy(dtype=np.float64)).all():
+        raise ValueError("fc contains infinite values; cap or filter them before building contexts")
 
     labels = obs[context_col]
     names = list(pd.unique(labels)) if contexts is None else list(contexts)

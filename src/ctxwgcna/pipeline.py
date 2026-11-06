@@ -81,6 +81,8 @@ class ContextWGCNA:
     def build_network(self, power=None):
         if power is not None:
             self.power = power
+        if self.support is None:
+            self.compute_support()
         if self.power is None:
             self.pick_power()
         self.adjacency = _net.adjacency_from_r(self.support.r, self.power, self.network_type)
@@ -136,6 +138,8 @@ class ContextWGCNA:
     def membership_matrix(self):
         """Boolean genes x submodules matrix (a gene may be True in several columns)."""
         m = self.memberships
+        if m is None:
+            raise ValueError("run split_modules() first")
         mat = pd.crosstab(m["gene"], m["submodule"]).astype(bool)
         return mat.reindex(self.genes, fill_value=False)
 

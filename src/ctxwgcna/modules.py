@@ -42,8 +42,9 @@ def _module_index(modules):
 def module_context_profile(adj, support, modules, min_t=None):
     """Which contexts support each module's internal edges.
 
-    For module m and context k: adjacency-weighted fraction of within-module edges whose top-n
-    supporting contexts include k. Rows sum to 1 (each edge carries n contexts, weight 1/n each).
+    For module m and context k: adjacency-weighted share of the within-module support carried by k,
+    where each edge's top-n supporting contexts count 1 each (only those with t >= min_t if min_t is
+    given). Rows are normalised to sum to 1 (all-zero rows, i.e. no qualifying support, stay 0).
     Compare with the uniform expectation 1/K.
     """
     A = np.array(adj, dtype=np.float64)
@@ -54,8 +55,9 @@ def module_context_profile(adj, support, modules, min_t=None):
         I = support.indicator(k, min_t)
         for m, g in idx.items():
             sub = A[np.ix_(g, g)]
-            out.loc[m, name] = (sub * I[np.ix_(g, g)]).sum() / (sub.sum() * support.top_n)
-    return out
+            out.loc[m, name] = (sub * I[np.ix_(g, g)]).sum()
+    tot = out.sum(axis=1)
+    return out.div(tot.where(tot > 0, 1.0), axis=0)
 
 
 def module_context_coherence(blocks, modules, method="pearson"):

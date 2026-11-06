@@ -101,3 +101,25 @@ same index with `system` / `condition` columns.
 - Module merging (eigengene-based merging would wrongly use global MEs for local modules) – not implemented.
 - Module–trait analysis restricted to supporting contexts.
 - PAM stage for unassigned genes (port is broken).
+
+## 2026-11-06 — external code review (Codex, Kimi) and fixes
+
+Both reviewers found no errors in the core math (similarity, top-n, summary, calibration, TOM, tree
+cut); Kimi brute-force checked shared/matched TOM and timed G=1000, K=300: support 8.6 s, matched TOM
+3.9 s (so Codex's "TOM infeasible at 300 contexts" was rejected). Verified and fixed:
+- dominance: genes with MAD = 0 used an SD that included the scored row, capping |z| at (n-1)/sqrt(n)
+  (4.3 at n = 20 < extreme_z 5), so a broad dominant row in a 20-row context (condition contexts,
+  sparse FC) was missed. Now leave-one-out SD. Also median ss = 0 gave fold 1 for all rows; now
+  changed rows get fold inf and breadth + cap decide. Sparse null still flags nothing (test).
+- pick_power crashed (KeyError nan) when all fits are NaN -> clear ValueError.
+- detect_dominant: missing label/context column -> ValueError up front; duplicate labels rejected.
+- analytic null simulated in chunks (was n_sim x K float64 at once, ~1.4 GB peak at K = 300);
+  identical numbers (same RNG stream).
+- module_context_profile(soft=False) rows renormalised (did not sum to 1 with support_min_t).
+- selection='absolute': signed t of selected contexts kept (top_t_signed); pair() reports t (signed)
+  and rank_stat.
+- input checks: inf, duplicated row/gene labels, min_obs < 4, n_perm < 1.
+- build_network computes support if needed; membership_matrix before split -> ValueError.
+- CLI --power skips the scale-free scan.
+Docs: analytic calibration is approximate for spearman/bicor; store_max_mb note for K = 300.
+Demo unchanged after fixes (bias 0.0852, ARI 0.981). Tests: 29.

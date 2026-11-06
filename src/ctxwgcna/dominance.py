@@ -22,14 +22,34 @@ import math
 import numpy as np
 import pandas as pd
 
+from .data import check_unique
+
+
 def _robust_gene_z(X):
-    """Per-gene robust z within a block (rows = observations): (x - median) / (1.4826 * MAD)."""
+    """Per-gene robust z within a block (rows = observations): (x - median) / (1.4826 * MAD).
+
+    Genes with MAD = 0 (more than half the rows identical, e.g. exact zeros in sparse FC) fall back to
+    the leave-one-out SD: each row is scaled by the SD of the OTHER rows. Including the row itself
+    would cap |z| at (n-1)/sqrt(n) (4.3 for n = 20), so a gene that changes only in the scored row
+    could never count as extreme in a small context. A gene flat in all other rows but changed in this
+    one gets z = +-inf (extreme).
+    """
+    n = X.shape[0]
     med = np.median(X, axis=0)
-    scale = 1.4826 * np.median(np.abs(X - med), axis=0)
-    sd = X.std(axis=0)
-    scale = np.where(scale > 0, scale, sd)  # genes with MAD = 0 fall back to the SD
+    mad = 1.4826 * np.median(np.abs(X - med), axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
-        Z = np.where(scale > 0, (X - med) / scale, 0.0)
+        Z = np.where(mad > 0, (X - med) / mad, 0.0)
+        flat = mad == 0
+        if flat.any() and n > 2:
+            Y = X[:, flat]
+            S, Q = Y.sum(axis=0), (Y ** 2).sum(axis=0)
+            m_loo = (S - Y) / (n - 1)
+            var_loo = np.maximum((Q - Y ** 2) / (n - 1) - m_loo ** 2, 0.0) * (n - 1) / (n - 2)
+            sd_loo = np.sqrt(var_loo)
+            dev = Y - med[flat]
+            tiny = 1e-12 * max(1.0, np.abs(Y).max())  # rounding noise of the sums
+            Z[:, flat] = np.where(sd_loo > tiny, dev / np.maximum(sd_loo, tiny),
+                                  np.where(np.abs(dev) > tiny, np.sign(dev) * np.inf, 0.0))
     return Z
 
 
@@ -56,6 +76,10 @@ def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fo
       summary  per label (if label_col given): n_contexts, n_dominant, frac_dominant, max_fold,
                median_fold, max_frac_extreme; sorted by n_dominant then max_fold
     """
+    check_unique(fc, obs)
+    for col in (context_col, label_col):
+        if col is not None and col not in obs.columns:
+            raise ValueError(f"{col!r} is not a column of obs (pass label_col=None to skip the summary)")
     if not fc.index.equals(obs.index):
         obs = obs.loc[fc.index]
     X_all = fc.to_numpy(dtype=np.float64)
@@ -68,11 +92,17 @@ def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fo
         X = X_all[mask]
         ss = (X ** 2).sum(axis=1)
         ref = np.median(ss)
-        fold = ss / ref if ref > 0 else np.ones_like(ss)
-        lf = np.log2(np.maximum(fold, 1e-12))
-        mad = 1.4826 * np.median(np.abs(lf - np.median(lf)))
-        mad = mad if mad > 0 else max(np.std(lf), 1e-12)
-        rz = (lf - np.median(lf)) / mad
+        if ref > 0:
+            fold = ss / ref
+            lf = np.log2(np.maximum(fold, 1e-12))
+            mad = 1.4826 * np.median(np.abs(lf - np.median(lf)))
+            mad = mad if mad > 0 else max(np.std(lf), 1e-12)
+            rz = (lf - np.median(lf)) / mad
+        else:
+            # more than half the rows have no change at all: any changed row is infinitely larger than
+            # the typical one; breadth (min_gene_frac) and the cap decide which are dominant
+            fold = np.where(ss > 0, np.inf, 0.0)
+            rz = fold.copy()
         n_ext = (np.abs(_robust_gene_z(X)) >= extreme_z).sum(axis=1)
         frac_ext = n_ext / n_genes
         cand = (fold >= min_fold) & (rz >= min_z) & (frac_ext >= min_gene_frac)

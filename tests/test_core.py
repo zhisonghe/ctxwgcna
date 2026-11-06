@@ -285,3 +285,130 @@ def test_cap_limits_flagged_fraction_and_warns(capsys):
     per_sys = rows.groupby("context")[["candidate", "dominant"]].sum()
     assert (per_sys["candidate"] == 10).all() and (per_sys["dominant"] == 5).all()
     assert "WARNING" in capsys.readouterr().out
+
+
+# --- regression tests for the external code review (Codex / Kimi, 2026-11-06) ---------------------
+
+def _single_context(X, ctx="s"):
+    idx = [f"r{i}" for i in range(X.shape[0])]
+    fc = pd.DataFrame(X, index=idx, columns=[f"g{j}" for j in range(X.shape[1])])
+    return fc, pd.DataFrame({"system": ctx, "condition": idx}, index=idx)
+
+
+def test_dominance_small_context_with_flat_genes_is_detected():
+    # 20 rows; most genes exactly 0 except in row 0 -> MAD = 0; previously |z| was capped at 4.3 < 5
+    rng = np.random.default_rng(0)
+    X = np.zeros((20, 500))
+    X[:, 400:] = rng.normal(0, 1, (20, 100))
+    X[0, :200] = 8
+    rows, _ = detect_dominant(*_single_context(X), verbose=False)
+    assert rows["dominant"].tolist() == [True] + [False] * 19
+    assert rows.iloc[0]["frac_extreme"] >= 0.4
+
+
+def test_dominance_zero_median_magnitude():
+    X = np.zeros((20, 500))
+    X[0, :200] = 8  # broad
+    X[1, :3] = 1  # changed but narrow
+    rows, _ = detect_dominant(*_single_context(X), verbose=False)
+    assert rows["dominant"].tolist() == [True] + [False] * 19
+
+
+def test_dominance_sparse_null_flags_nothing():
+    rng = np.random.default_rng(1)
+    fc, obs = [], []
+    for s in range(3):
+        X = rng.normal(0, 1, (20, 400)) * (rng.random((20, 400)) < 0.1)
+        f, o = _single_context(X, ctx=f"sys{s}")
+        f.index = o.index = [f"sys{s}|{i}" for i in f.index]
+        fc.append(f)
+        obs.append(o)
+    rows, _ = detect_dominant(pd.concat(fc), pd.concat(obs), verbose=False)
+    assert not rows["dominant"].any()
+
+
+def test_dominance_validates_columns_and_labels():
+    fc, obs = _single_context(np.random.default_rng(0).normal(size=(20, 30)))
+    with pytest.raises(ValueError, match="not a column"):
+        detect_dominant(fc, obs.drop(columns="condition"), verbose=False)
+    rows, summary = detect_dominant(fc, obs.drop(columns="condition"), label_col=None, verbose=False)
+    assert summary is None and len(rows) == 20
+    with pytest.raises(ValueError, match="duplicated"):
+        detect_dominant(fc.iloc[[0, 0, 1]], obs.iloc[[0, 0, 1]], verbose=False)
+
+
+def test_pick_power_all_nan_raises():
+    from ctxwgcna.network import pick_power
+    t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})
+    with pytest.raises(ValueError, match="set the power"):
+        pick_power(t)
+    t.loc[1, "signed R.sq"] = 0.3
+    assert pick_power(t) == (2, False)
+
+
+def test_analytic_null_chunking_is_exact():
+    from ctxwgcna.support import _analytic_null
+    n = np.array([20, 30, 25, 40, 22])
+    a = _analytic_null(n, 2, "positive", "n", 50_000, np.random.default_rng(3), chunk=50_000)
+    b = _analytic_null(n, 2, "positive", "n", 50_000, np.random.default_rng(3), chunk=7_000)
+    np.testing.assert_allclose(a, b, rtol=1e-10)
+
+
+def test_absolute_selection_keeps_sign():
+    rng = np.random.default_rng(4)
+    blocks = _blocks(rng)
+    x = rng.standard_normal(blocks[2].n_obs)
+    blocks[2].X[:, 0], blocks[2].X[:, 1] = x, -x + 0.05 * rng.standard_normal(len(x))  # strong negative
+    sup = compute_support(blocks, top_n=3, selection="absolute", calibrate="none")
+    T = np.stack([fisher_z(similarity_matrix(b.X)) * np.sqrt(b.n_obs - 3) for b in blocks])
+    expect = np.take_along_axis(T.transpose(1, 2, 0), sup.top_idx.astype(int), -1)
+    np.testing.assert_allclose(sup.top_t_signed, expect, rtol=1e-5, atol=1e-5)
+    p = sup.pair(0, 1)
+    assert p.iloc[0]["context"] == blocks[2].name and p.iloc[0]["t"] < 0 < p.iloc[0]["rank_stat"]
+    pos = compute_support(blocks, top_n=3, selection="positive", calibrate="none")
+    assert pos.top_t_signed is None and (pos.pair(0, 1)["t"] == pos.pair(0, 1)["rank_stat"]).all()
+
+
+def test_input_validation():
+    rng = np.random.default_rng(0)
+    fc = pd.DataFrame(rng.normal(size=(20, 5)), columns=list("abcde"))
+    obs = pd.DataFrame({"system": ["a"] * 20})
+    bad = fc.copy()
+    bad.iloc[0, 0] = np.inf
+    with pytest.raises(ValueError, match="infinite"):
+        make_context_blocks(bad, obs, "system", min_obs=5)
+    with pytest.raises(ValueError, match="duplicated"):
+        make_context_blocks(fc.set_axis(list("abcda"), axis=1), obs, "system", min_obs=5)
+    with pytest.raises(ValueError, match="min_obs"):
+        make_context_blocks(fc, obs, "system", min_obs=3)
+    with pytest.raises(ValueError, match="n_perm"):
+        compute_support(make_context_blocks(fc, obs, "system", min_obs=5), top_n=1,
+                        calibrate="permutation", n_perm=0)
+
+
+@pytest.fixture(scope="module")
+def small_run():
+    fc, obs, truth = simulate_fc(n_genes=320, seed=5)
+    cw = ContextWGCNA(fc, obs, support_min_t=2.0)
+    return cw
+
+
+def test_stepwise_api_and_profile_normalisation(small_run):
+    cw = small_run
+    with pytest.raises(ValueError, match="split_modules"):
+        cw.membership_matrix()
+    cw.build_network(power=12)  # computes the support itself
+    cw.find_modules()
+    prof = cw.module_context_profile(soft=False)
+    s = prof.sum(axis=1)
+    assert np.allclose(s[s > 0], 1.0)
+
+
+def test_cli_given_power_skips_scan(tmp_path):
+    import importlib.util, os
+    spec = importlib.util.spec_from_file_location(
+        "run_ctxwgcna", os.path.join(os.path.dirname(__file__), "..", "scripts", "run_ctxwgcna.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.main(["--simulate", "--power", "12", "--no-split", "--outdir", str(tmp_path)])
+    assert (tmp_path / "modules.csv").exists() and not (tmp_path / "soft_threshold.csv").exists()

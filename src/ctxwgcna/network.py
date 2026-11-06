@@ -78,7 +78,11 @@ def pick_power(table, r2_cut=0.85, mean_cut=100):
     ok = table[(table["signed R.sq"] >= r2_cut) & (table["mean(k)"] <= mean_cut)]
     if len(ok):
         return int(ok["power"].min()), True
-    return int(table.loc[table["signed R.sq"].idxmax(), "power"]), False
+    fit = table["signed R.sq"].dropna()
+    if fit.empty:
+        raise ValueError("the scale-free fit failed for every power (e.g. constant connectivity); "
+                         "set the power explicitly")
+    return int(table.loc[fit.idxmax(), "power"]), False
 
 
 def context_tom(adj, support=None, mode="matched", min_t=None):

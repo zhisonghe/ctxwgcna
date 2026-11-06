@@ -64,7 +64,8 @@ def parse_args(argv=None):
 
     n = p.add_argument_group("network")
     n.add_argument("--network-type", default="signed", choices=["signed", "signed hybrid", "unsigned"])
-    n.add_argument("--power", type=int, default=None, help="soft-threshold power (default: scale-free pick)")
+    n.add_argument("--power", type=int, default=None,
+                   help="soft-threshold power (default: scale-free pick); given, the power scan is skipped")
     n.add_argument("--r2-cut", type=float, default=0.85)
     n.add_argument("--tom-mode", default="matched", choices=["matched", "shared", "standard"])
 
@@ -133,11 +134,13 @@ def main(argv=None):
     print(f"support: top_n={sup.top_n}, selection={sup.selection}, calibrate={sup.calibrate}, "
           f"mean bias={np.mean(sup.bias):.4f} (Fisher z)")
 
-    cw.pick_power(r2_cut=args.r2_cut)
-    cw.sft.to_csv(out("soft_threshold.csv"), index=False)
     if args.power is not None:
         cw.power = args.power
-    print(f"power: {cw.power} (scale-free table in soft_threshold.csv)")
+        print(f"power: {cw.power} (given; scale-free scan skipped, no soft_threshold.csv)")
+    else:
+        cw.pick_power(r2_cut=args.r2_cut)
+        cw.sft.to_csv(out("soft_threshold.csv"), index=False)
+        print(f"power: {cw.power} (scale-free table in soft_threshold.csv)")
 
     cw.build_network()
     mods = cw.find_modules(min_module_size=args.min_module_size, deep_split=args.deep_split)
