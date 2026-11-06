@@ -73,7 +73,10 @@ matching PyWGCNA's output to 1e-13. `external/PyWGCNA/` (a source clone) and
 
 ## 2. Preparing the input
 
-You need two tables with the **same row index**.
+You need two tables with the **same row index**. The method was designed for fold-change (FC) data
+and the examples below use FC, but any samples × genes matrix works, as in standard WGCNA (see
+[Using expression data instead of FC](#using-expression-data-instead-of-fc)). The argument is still
+called `fc` (`--fc` in the script).
 
 **FC matrix** `fc` — rows = observations, columns = genes.
 
@@ -108,6 +111,24 @@ has genes as rows, transpose it (`fc.T`, or `--transpose` in the script).
 
   Contexts with fewer than `min_obs` observations are dropped. Correlations from very few
   observations are noise.
+
+### Using expression data instead of FC
+Nothing in the core method needs fold changes: per-context similarities, top-n selection, the
+context TOM, modules and the submodule split work the same on a log-normalised or variance-stabilised
+expression matrix (e.g. DESeq2 `vst`, log-CPM), rows = samples, columns = genes. Correlations are
+computed within each context, so each context's own mean is removed and baseline differences
+between contexts do not create co-expression.
+
+Two parts assume FC, where 0 means "no change":
+
+| Part | Why it assumes FC | With expression data |
+|---|---|---|
+| `similarity="cosine"` | uncentred: rewards genes moving away from 0 together | 0 has no meaning, so cosine mostly reflects expression level. Use `pearson`, `spearman` or `bicor`. |
+| `detect_dominant` / `--detect-dominant` | a profile's size is its distance from 0 (sum of squares) | it would flag highly expressed samples. Centre each gene within its context first (`X - X.groupby(obs[context_col]).transform("mean")`), or skip this step. |
+
+Each context still needs enough samples for a stable correlation (`min_obs`, default 10; 15–20 or
+more is better). With FC from a 300-condition design this is easy; with plain expression data a
+context is often only a few replicates, too few to use as a context on their own.
 
 ### Dominant conditions: detect and remove them first
 
