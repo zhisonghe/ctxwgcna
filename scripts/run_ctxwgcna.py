@@ -91,49 +91,66 @@ def parse_args(argv=None):
     return args
 
 
+def load_data(args):
+    """Return (fc, obs, truth): the data matrix, the observation table, and simulation truth (or None)."""
+    if args.simulate:
+        from ctxwgcna.simulate import simulate_fc
+        return simulate_fc(n_genes=1000, n_systems=20, n_conditions=300, seed=args.seed)
+    fc = read_table(args.fc, args.sep)
+    fc = fc.T if args.transpose else fc
+    obs = read_table(args.obs, args.sep)
+    return fc, obs, None
+
+
+def dominance_step(args, fc, obs, out):
+    """Detect dominant FC profiles, write the reports, and remove them if --exclude-dominant.
+
+    Returns (fc, obs, n_removed).
+    """
+    label_col = args.dominant_label_col if args.dominant_label_col in obs.columns else None
+    rows, summary = detect_dominant(
+        fc, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
+        min_z=args.dominant_min_z, min_gene_frac=args.dominant_min_gene_frac,
+        max_frac=args.dominant_max_frac)
+    rows.to_csv(out("dominance_rows.csv"))
+    if summary is not None:
+        summary.to_csv(out("dominance_summary.csv"))
+    if not args.exclude_dominant:
+        return fc, obs, 0
+    n_before = len(fc)
+    fc, obs = drop_dominant(fc, obs, rows)
+    print(f"removed {n_before - len(fc)} dominant FC profiles; {len(fc)} remain")
+    return fc, obs, n_before - len(fc)
+
+
 def main(argv=None):
     args = parse_args(argv)
     os.makedirs(args.outdir, exist_ok=True)
-    out = lambda name: os.path.join(args.outdir, name)
+
+    def out(name):
+        return os.path.join(args.outdir, name)
+
     t0 = time.time()
 
-    truth = None
-    if args.simulate:
-        from ctxwgcna.simulate import simulate_fc
-        fc, obs, truth = simulate_fc(n_genes=1000, n_systems=20, n_conditions=300, seed=args.seed)
-    else:
-        fc = read_table(args.fc, args.sep)
-        fc = fc.T if args.transpose else fc
-        obs = read_table(args.obs, args.sep)
+    # --- input, optional removal of dominant profiles ---
+    fc, obs, truth = load_data(args)
     print(f"FC matrix: {fc.shape[0]} observations x {fc.shape[1]} genes")
-
     n_dropped = 0
     if args.detect_dominant or args.exclude_dominant:
-        label_col = args.dominant_label_col if args.dominant_label_col in obs.columns else None
-        dom_rows, dom_summary = detect_dominant(
-            fc, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
-            min_z=args.dominant_min_z, min_gene_frac=args.dominant_min_gene_frac,
-            max_frac=args.dominant_max_frac)
-        dom_rows.to_csv(out("dominance_rows.csv"))
-        if dom_summary is not None:
-            dom_summary.to_csv(out("dominance_summary.csv"))
-        if args.exclude_dominant:
-            n0 = len(fc)
-            fc, obs = drop_dominant(fc, obs, dom_rows)
-            n_dropped = n0 - len(fc)
-            print(f"removed {n_dropped} dominant FC profiles; {len(fc)} remain")
+        fc, obs, n_dropped = dominance_step(args, fc, obs, out)
 
+    # --- steps 1-4: contexts and context support ---
     contexts = args.contexts.split(",") if args.contexts else None
     cw = ContextWGCNA(fc, obs, context_col=args.context_col, contexts=contexts, similarity=args.similarity,
                       top_n=args.top_n, network_type=args.network_type, weighting=args.weighting,
                       calibrate=args.calibrate, n_perm=args.n_perm, tom_mode=args.tom_mode,
                       min_obs=args.min_obs, seed=args.seed)
     print(f"{len(cw.blocks)} contexts: " + ", ".join(f"{b.name}(n={b.n_obs})" for b in cw.blocks))
-
     sup = cw.compute_support()
     print(f"support: top_n={sup.top_n}, selection={sup.selection}, calibrate={sup.calibrate}, "
           f"mean bias={np.mean(sup.bias):.4f} (Fisher z)")
 
+    # --- step 5: power, network, hard modules ---
     if args.power is not None:
         cw.power = args.power
         print(f"power: {cw.power} (given; scale-free scan skipped, no soft_threshold.csv)")
@@ -141,15 +158,14 @@ def main(argv=None):
         cw.pick_power(r2_cut=args.r2_cut)
         cw.sft.to_csv(out("soft_threshold.csv"), index=False)
         print(f"power: {cw.power} (scale-free table in soft_threshold.csv)")
-
     cw.build_network()
     mods = cw.find_modules(min_module_size=args.min_module_size, deep_split=args.deep_split)
     mods.to_csv(out("modules.csv"))
     print("modules:", mods.value_counts().to_dict())
-
     cw.module_context_profile().to_csv(out("module_context_profile.csv"))
     cw.module_context_coherence().to_csv(out("module_context_coherence.csv"))
 
+    # --- overlapping submodules ---
     if not args.no_split:
         subs, mem = cw.split_modules(t_thr=args.t_thr, min_size=args.min_submodule_size,
                                      min_partners=args.min_partners, jaccard_cut=args.jaccard_cut,
@@ -160,23 +176,23 @@ def main(argv=None):
         print(f"submodules: {len(subs)} ({(subs.groupby('parent').size() > 1).sum()} modules split, "
               f"{int(subs['n_overlap'].sum())} gene-submodule overlaps)")
 
+    # --- optional extras ---
     if args.global_baseline:
         glob, gp = global_wgcna(fc, similarity=args.similarity, network_type=args.network_type,
                                 power=args.power, min_module_size=args.min_module_size,
                                 deep_split=args.deep_split)
         glob.rename("global_module").to_csv(out("global_modules.csv"))
         print(f"global baseline (power {gp}):", glob.value_counts().to_dict())
-
     if args.save_matrices:
         np.savez_compressed(out("matrices.npz"), genes=np.asarray(cw.genes), summary_r=cw.support.r,
                             adjacency=cw.adjacency, tom=cw.tom)
-
     if truth is not None:
         from sklearn.metrics import adjusted_rand_score
         truth.to_csv(out("simulation_truth.csv"))
         print(f"simulation: ARI(modules, truth) = {adjusted_rand_score(truth, mods):.3f}")
 
-    config = {k: v for k, v in vars(args).items()}
+    # --- record the run ---
+    config = dict(vars(args))
     config.update(chosen_power=cw.power, n_contexts=len(cw.blocks), n_dominant_removed=n_dropped,
                   runtime_s=round(time.time() - t0, 1))
     with open(out("run_config.json"), "w") as fh:

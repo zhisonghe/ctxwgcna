@@ -16,6 +16,9 @@ Each FC profile (row) is compared with the other rows of its own context (e.g. t
 of the same system), so dominance can be system-specific. Several dominant rows are allowed, but they
 are expected to be a small minority (max_frac, default 5% of a context's rows): the median/MAD
 reference is only valid then, and widespread "dominance" is a continuum, not a few outliers.
+
+Magnitude is measured as distance from 0, so this assumes FC-like data (0 = no change). For an
+expression matrix, centre each gene within its context first.
 """
 import math
 
@@ -23,6 +26,8 @@ import numpy as np
 import pandas as pd
 
 from .data import check_unique
+
+MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
 
 
 def _robust_gene_z(X):
@@ -36,12 +41,13 @@ def _robust_gene_z(X):
     """
     n = X.shape[0]
     med = np.median(X, axis=0)
-    mad = 1.4826 * np.median(np.abs(X - med), axis=0)
+    mad = MAD_TO_SD * np.median(np.abs(X - med), axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
         Z = np.where(mad > 0, (X - med) / mad, 0.0)
         flat = mad == 0
         if flat.any() and n > 2:
             Y = X[:, flat]
+            # leave-one-out mean and (unbiased) variance of each column, for every left-out row
             S, Q = Y.sum(axis=0), (Y ** 2).sum(axis=0)
             m_loo = (S - Y) / (n - 1)
             var_loo = np.maximum((Q - Y ** 2) / (n - 1) - m_loo ** 2, 0.0) * (n - 1) / (n - 2)
@@ -51,6 +57,53 @@ def _robust_gene_z(X):
             Z[:, flat] = np.where(sd_loo > tiny, dev / np.maximum(sd_loo, tiny),
                                   np.where(np.abs(dev) > tiny, np.sign(dev) * np.inf, 0.0))
     return Z
+
+
+def _magnitude_scores(X):
+    """Per row: sum of squares, fold over the context median, and robust z of log2(fold)."""
+    ss = (X ** 2).sum(axis=1)
+    ref = np.median(ss)
+    if ref == 0:
+        # more than half the rows have no change at all: any changed row is infinitely larger than
+        # the typical one; breadth (min_gene_frac) and the cap decide which are dominant
+        fold = np.where(ss > 0, np.inf, 0.0)
+        return ss, fold, fold.copy()
+    fold = ss / ref
+    log_fold = np.log2(np.maximum(fold, 1e-12))
+    centred = log_fold - np.median(log_fold)
+    mad = MAD_TO_SD * np.median(np.abs(centred))
+    mad = mad if mad > 0 else max(np.std(log_fold), 1e-12)
+    return ss, fold, centred / mad
+
+
+def _score_context(X, min_fold, min_z, min_gene_frac, extreme_z, max_frac):
+    """Score the rows of one context. Returns (columns dict, n_candidates, cap)."""
+    ss, fold, robust_z = _magnitude_scores(X)
+    n_extreme = (np.abs(_robust_gene_z(X)) >= extreme_z).sum(axis=1)  # breadth
+    frac_extreme = n_extreme / X.shape[1]
+    candidate = (fold >= min_fold) & (robust_z >= min_z) & (frac_extreme >= min_gene_frac)
+
+    # cap: flag at most max_frac of the rows (at least 1), the largest folds first
+    cap = max(1, math.floor(max_frac * X.shape[0]))
+    dominant = candidate.copy()
+    if candidate.sum() > cap:
+        strongest = np.argsort(-np.where(candidate, fold, -np.inf))[:cap]
+        dominant[:] = False
+        dominant[strongest] = True
+    cols = {"ss": ss, "fold": fold, "robust_z": robust_z, "n_extreme": n_extreme,
+            "frac_extreme": frac_extreme, "candidate": candidate, "dominant": dominant}
+    return cols, int(candidate.sum()), cap
+
+
+def _summarise_by_label(rows):
+    """Per label (e.g. condition): in how many contexts it is dominant, and how large it is."""
+    g = rows.groupby("label", sort=False)
+    summary = pd.DataFrame({
+        "n_contexts": g.size(), "n_dominant": g["dominant"].sum().astype(int),
+        "max_fold": g["fold"].max(), "median_fold": g["fold"].median(),
+        "max_frac_extreme": g["frac_extreme"].max()})
+    summary.insert(2, "frac_dominant", summary["n_dominant"] / summary["n_contexts"])
+    return summary.sort_values(["n_dominant", "max_fold"], ascending=False)
 
 
 def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fold=5.0, min_z=4.0,
@@ -84,52 +137,20 @@ def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fo
         obs = obs.loc[fc.index]
     X_all = fc.to_numpy(dtype=np.float64)
     ctx = obs[context_col].to_numpy()
-    n_genes = X_all.shape[1]
 
-    parts, capped = [], []
+    parts, capped = [], []  # capped: (context, n_candidates, cap) where the cap was hit
     for c in pd.unique(ctx):
-        mask = ctx == c
-        X = X_all[mask]
-        ss = (X ** 2).sum(axis=1)
-        ref = np.median(ss)
-        if ref > 0:
-            fold = ss / ref
-            lf = np.log2(np.maximum(fold, 1e-12))
-            mad = 1.4826 * np.median(np.abs(lf - np.median(lf)))
-            mad = mad if mad > 0 else max(np.std(lf), 1e-12)
-            rz = (lf - np.median(lf)) / mad
-        else:
-            # more than half the rows have no change at all: any changed row is infinitely larger than
-            # the typical one; breadth (min_gene_frac) and the cap decide which are dominant
-            fold = np.where(ss > 0, np.inf, 0.0)
-            rz = fold.copy()
-        n_ext = (np.abs(_robust_gene_z(X)) >= extreme_z).sum(axis=1)
-        frac_ext = n_ext / n_genes
-        cand = (fold >= min_fold) & (rz >= min_z) & (frac_ext >= min_gene_frac)
-        dom = cand.copy()
-        cap = max(1, math.floor(max_frac * mask.sum()))
-        if cand.sum() > cap:
-            keep = np.argsort(-np.where(cand, fold, -np.inf))[:cap]
-            dom[:] = False
-            dom[keep] = True
-            capped.append((c, int(cand.sum()), cap))
-        part = pd.DataFrame({
-            "context": c, "ss": ss, "fold": fold, "robust_z": rz, "n_extreme": n_ext,
-            "frac_extreme": frac_ext, "candidate": cand, "dominant": dom}, index=fc.index[mask])
+        in_context = ctx == c
+        cols, n_cand, cap = _score_context(X_all[in_context], min_fold, min_z, min_gene_frac,
+                                           extreme_z, max_frac)
+        if n_cand > cap:
+            capped.append((c, n_cand, cap))
+        part = pd.DataFrame({"context": c, **cols}, index=fc.index[in_context])
         if label_col is not None:
             part.insert(1, "label", obs.loc[part.index, label_col].to_numpy())
         parts.append(part)
-    rows = pd.concat(parts).loc[fc.index]
-
-    summary = None
-    if label_col is not None:
-        g = rows.groupby("label", sort=False)
-        summary = pd.DataFrame({
-            "n_contexts": g.size(), "n_dominant": g["dominant"].sum().astype(int),
-            "max_fold": g["fold"].max(), "median_fold": g["fold"].median(),
-            "max_frac_extreme": g["frac_extreme"].max()})
-        summary.insert(2, "frac_dominant", summary["n_dominant"] / summary["n_contexts"])
-        summary = summary.sort_values(["n_dominant", "max_fold"], ascending=False)
+    rows = pd.concat(parts).loc[fc.index]  # back to the input row order
+    summary = _summarise_by_label(rows) if label_col is not None else None
 
     if verbose:
         n_dom = int(rows["dominant"].sum())
@@ -149,6 +170,6 @@ def detect_dominant(fc, obs, context_col="system", label_col="condition", min_fo
 
 
 def drop_dominant(fc, obs, rows):
-    """Remove flagged rows; returns (fc, obs) without them."""
-    keep = ~rows.loc[fc.index, "dominant"].to_numpy()
-    return fc.loc[keep], obs.loc[obs.index.intersection(fc.index[keep])].loc[fc.index[keep]]
+    """Remove the rows flagged as dominant; returns (fc, obs) without them, in fc's row order."""
+    kept = fc.index[~rows.loc[fc.index, "dominant"].to_numpy()]
+    return fc.loc[kept], obs.loc[kept]

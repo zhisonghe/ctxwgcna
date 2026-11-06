@@ -6,26 +6,33 @@ from . import modules as _mod
 from . import network as _net
 from . import submodules as _sub
 from .data import make_context_blocks
-from .similarity import fisher_z, similarity_matrix
-from .support import compute_support
+from .similarity import similarity_matrix, standardized_z
+from .support import compute_support, soft_context_weights
 
 
 class ContextWGCNA:
     """
     Steps:
-      1. contexts       obs[context_col] groups the FC rows (e.g. by 'system' or 'condition')
+      1. contexts       obs[context_col] groups the rows (e.g. by 'system' or 'condition')
       2. similarity     per context: pearson / spearman / bicor / cosine
       3. top-n          Fisher z, standardized by sqrt(n_c - 3), best n contexts per pair (ids kept)
       4. summary        weighted mean of selected z, minus selection bias (calibrate=...)
       5. WGCNA          soft-threshold adjacency -> context-restricted TOM (tom_mode=...) ->
                         dynamic tree cut -> per-module context profiles
+      then optionally   split_modules(): overlapping, context-defined submodules per module
 
-    :param fc: DataFrame, rows = observations (FC profiles), columns = genes.
+    Typical use:  cw = ContextWGCNA(fc, obs); cw.run(); cw.split_modules()
+    Each step can also be called on its own; missing earlier steps are run automatically.
+
+    :param fc: DataFrame, rows = observations (FC profiles or samples), columns = genes.
     :param obs: DataFrame indexed like fc with context annotations.
     :param network_type: 'signed' (default), 'signed hybrid' or 'unsigned'. Determines the
         top-n selection rule unless `selection` is given ('positive' for signed types,
         'absolute' for unsigned).
     :param tom_mode: 'matched' (default), 'shared', or 'standard' (plain WGCNA TOM).
+    :param support_min_t: count a context as supporting a pair (in the TOM and the hard module
+        profile) only if its t >= this value.
+    See README.md section 4 for all parameters.
     """
 
     def __init__(self, fc, obs, context_col="system", contexts=None, similarity="pearson", top_n=3,
@@ -34,6 +41,7 @@ class ContextWGCNA:
                  store_context_t="auto", store_max_mb=2048):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
+        # --- settings ---
         self.fc, self.obs = fc, obs
         self.genes = pd.Index(fc.columns)
         self.context_col = context_col
@@ -46,20 +54,22 @@ class ContextWGCNA:
         self.seed, self.chunk_mb = seed, chunk_mb
         self.store_context_t, self.store_max_mb = store_context_t, store_max_mb
 
+        # --- step 1 now; results of later steps are filled in as they run ---
         self.blocks = make_context_blocks(fc, obs, context_col, contexts=contexts, min_obs=min_obs)
-        self.support = None
-        self.power = None
-        self.sft = None
+        self.support = None  # ContextSupport (steps 2-4)
+        self.power = None  # soft-threshold power
+        self.sft = None  # scale-free fit table
         self.adjacency = None
         self.tom = None
-        self.modules = None
-        self.linkage = None
+        self.modules = None  # Series gene -> module label ('M0' = unassigned)
+        self.linkage = None  # gene dendrogram (scipy linkage matrix)
         self._min_module_size = None
         self.submodules = None
         self.memberships = None
 
     # -- steps -----------------------------------------------------------------------------------
     def compute_support(self):
+        """Steps 2-4: per-context similarity, top-n contexts per pair, calibrated summary z."""
         self.support = compute_support(
             self.blocks, method=self.similarity, top_n=self.top_n, selection=self.selection,
             weighting=self.weighting, calibrate=self.calibrate, n_perm=self.n_perm,
@@ -68,9 +78,10 @@ class ContextWGCNA:
         return self.support
 
     def pick_power(self, powers=None, r2_cut=0.85, mean_cut=100):
+        """Choose the soft-threshold power by scale-free fit; sets .power and returns the fit table."""
         if self.support is None:
             self.compute_support()
-        powers = list(range(1, 11)) + list(range(12, 31, 2)) if powers is None else powers
+        powers = _net.DEFAULT_POWERS if powers is None else powers
         self.sft = _net.scale_free_table(self.support.r, powers, self.network_type)
         self.power, found = _net.pick_power(self.sft, r2_cut, mean_cut)
         if not found:
@@ -79,6 +90,7 @@ class ContextWGCNA:
         return self.sft
 
     def build_network(self, power=None):
+        """Adjacency and context-restricted TOM (power: given, previously chosen, or picked now)."""
         if power is not None:
             self.power = power
         if self.support is None:
@@ -91,6 +103,7 @@ class ContextWGCNA:
         return self.tom
 
     def find_modules(self, min_module_size=30, deep_split=2, **cutree_kwargs):
+        """Hard (non-overlapping) modules by dynamic hybrid tree cut of 1 - TOM."""
         if self.tom is None:
             self.build_network()
         self._min_module_size = min_module_size
@@ -99,21 +112,25 @@ class ContextWGCNA:
         return self.modules
 
     def run(self, power=None, min_module_size=30, deep_split=2, **cutree_kwargs):
+        """All steps from scratch; the power is picked by scale-free fit unless given."""
         self.compute_support()
-        if power is None:
-            self.pick_power()
-        self.build_network(power)
+        self.power = power
+        self.build_network()
         return self.find_modules(min_module_size=min_module_size, deep_split=deep_split, **cutree_kwargs)
 
     # -- second level: overlapping submodules -----------------------------------------------------
     def _context_t(self, idx):
-        """(K, m, m) per-context standardized z for gene indices idx (stored, or recomputed)."""
+        """(K, m, m) per-context t for gene indices idx: stored ones, or recomputed for just idx."""
         if self.support.t_all is not None:
             return self.support.context_t(idx)
         out = np.empty((len(self.blocks), len(idx), len(idx)), dtype=np.float32)
         for k, b in enumerate(self.blocks):
-            out[k] = fisher_z(similarity_matrix(b.X[:, idx], self.similarity)) * np.sqrt(max(b.n_obs - 3, 1))
+            out[k] = standardized_z(b.X[:, idx], self.similarity)
         return out
+
+    def _context_weights(self, idx):
+        """(K, m, m) soft context weights for gene indices idx."""
+        return soft_context_weights(self._context_t(idx), self.selection)
 
     def split_modules(self, t_thr=3.0, min_size=None, min_partners=None, jaccard_cut=0.5,
                       min_context_frac=0.5, dedup_jaccard=0.8):
@@ -147,23 +164,21 @@ class ContextWGCNA:
     def module_context_profile(self, soft=True):
         """Context profile of each module's internal edges (rows sum to 1).
 
-        soft=True: adjacency-weighted mean of the stored per-edge soft context weights (all contexts).
-        soft=False: share of edges whose top-n supporting contexts include each context.
+        soft=True: adjacency-weighted mean of the per-edge soft context weights (all contexts).
+        soft=False: adjacency-weighted share of the edges' top-n supporting contexts.
         """
-        if soft:
-            prof = _sub.module_context_profile_soft(
-                self.adjacency, lambda idx: self.support.context_weights(idx) if self.support.t_all is not None
-                else _soft_weights(self._context_t(idx), self.selection), self.modules)
-            prof.columns = self.support.contexts
-            return prof
-        return _mod.module_context_profile(self.adjacency, self.support, self.modules, self.support_min_t)
+        if not soft:
+            return _mod.module_context_profile(self.adjacency, self.support, self.modules, self.support_min_t)
+        prof = _mod.module_context_profile_soft(self.adjacency, self._context_weights, self.modules)
+        prof.columns = self.support.contexts
+        return prof
 
     def module_context_coherence(self):
         """Mean within-module similarity per context (direct check, independent of top-n)."""
         return _mod.module_context_coherence(self.blocks, self.modules, self.similarity)
 
     def context_eigengenes(self, module, contexts=None):
-        """Module eigengene computed separately within each (supporting) context.
+        """Module eigengene computed separately within each context (optionally only `contexts`).
 
         Returns {context: (Series of eigengene values over that context's observations, var explained)}.
         """
@@ -172,25 +187,20 @@ class ContextWGCNA:
         for b in self.blocks:
             if contexts is not None and b.name not in contexts:
                 continue
-            me, ve = _mod.eigengene(b.X[:, g], center=self.similarity != "cosine")
-            out[b.name] = (pd.Series(me, index=b.obs_names, name=f"ME{module}"), ve)
+            me, var_explained = _mod.eigengene(b.X[:, g], center=self.similarity != "cosine")
+            out[b.name] = (pd.Series(me, index=b.obs_names, name=f"ME{module}"), var_explained)
         return out
-
-
-def _soft_weights(t, selection):
-    w = np.maximum(np.abs(t) if selection == "absolute" else t, 0.0)
-    tot = w.sum(axis=0, keepdims=True)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(tot > 0, w / tot, 0.0)
 
 
 def global_wgcna(fc, similarity="pearson", network_type="signed", power=None, powers=None,
                  min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100):
-    """Baseline: one similarity over all observations pooled + standard TOM."""
+    """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
+
+    Returns (module labels, power used).
+    """
     r = similarity_matrix(fc.to_numpy(), similarity)
     if power is None:
-        powers = list(range(1, 11)) + list(range(12, 31, 2)) if powers is None else powers
-        sft = _net.scale_free_table(r, powers, network_type)
+        sft = _net.scale_free_table(r, _net.DEFAULT_POWERS if powers is None else powers, network_type)
         power, _ = _net.pick_power(sft, r2_cut, mean_cut)
     adj = _net.adjacency_from_r(r, power, network_type)
     tom = _net.context_tom(adj, mode="standard")

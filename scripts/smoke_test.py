@@ -3,7 +3,6 @@
 Reference only: needs PyWGCNA, which is not a ctxwgcna dependency (pip install PyWGCNA).
 Run:  .venv/bin/python scripts/smoke_test.py
 """
-import os
 import sys
 import tempfile
 

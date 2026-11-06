@@ -2,8 +2,11 @@
 import numpy as np
 import pandas as pd
 
-# name -> (gene index range, active systems). Q is shared by PQ (system 6) and QR (system 7):
-# a context-blind TOM tends to chain P-Q-R together; a context-matched TOM should not.
+# Planted co-regulated gene sets: name -> (gene index range, systems in which the set is active).
+# G1 is global, L1/L2 are local to two systems each. PQ (system 6) and QR (system 7) overlap in the
+# genes 220-259 ("Q"): a context-blind TOM tends to chain P-Q-R together; a context-matched TOM should
+# keep P and R apart, and the submodule split should place Q in both.
+# DEFAULT_TRUTH gives each gene one label for scoring: (label, first gene, last gene + 1).
 DEFAULT_DESIGN = {
     "G1": (range(0, 60), "all"),
     "L1": (range(60, 120), [0, 1]),
@@ -32,10 +35,11 @@ def simulate_fc(n_genes=500, n_systems=10, n_conditions=100, design=None, truth=
     fc = noise_sd * rng.standard_normal((n_systems, n_conditions, n_genes))
     for genes, active in design.values():
         genes = np.asarray(list(genes))
-        act = range(n_systems) if active == "all" else active
-        lam = rng.uniform(*loading, size=len(genes))
-        for s in act:
-            fc[s][:, genes] += rng.standard_normal((n_conditions, 1)) * lam
+        active_systems = range(n_systems) if active == "all" else active
+        loadings = rng.uniform(*loading, size=len(genes))  # fixed per gene, shared across systems
+        for s in active_systems:
+            # one latent condition profile per system, scaled by each gene's loading
+            fc[s][:, genes] += rng.standard_normal((n_conditions, 1)) * loadings
 
     gene_names = [f"g{i:04d}" for i in range(n_genes)]
     obs = pd.DataFrame([(s, c) for s in systems for c in conditions], columns=["system", "condition"])
