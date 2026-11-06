@@ -14,6 +14,7 @@ dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "dynamicTreeCut==0.
 test = ["pytest", "scikit-learn", "anndata"]
 anndata = ["anndata"]
 docs = ["matplotlib"]
+jupyter = ["ipykernel", "anndata"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

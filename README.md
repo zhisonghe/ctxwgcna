@@ -77,6 +77,34 @@ python scripts/run_ctxwgcna.py --simulate --power 12 --min-module-size 20 --outd
 The demo should report `simulation: ARI(modules, truth) ≈ 0.98` and one module split into two
 overlapping submodules.
 
+### Use in Jupyter / JupyterHub
+Install the `[jupyter]` extra (`ipykernel`, plus `anndata` to read `.h5ad` files) and register the
+venv as a kernel:
+
+```bash
+cd /path/to/adapt_WGCNA
+uv pip install --python .venv/bin/python -e ".[jupyter]"     # or: pip install -e ".[jupyter]"
+.venv/bin/python -m ipykernel install --user --name ctxwgcna --display-name "Python (ctxwgcna)"
+```
+
+"Python (ctxwgcna)" then appears in the Jupyter / JupyterHub launcher and kernel picker (refresh
+the page, or restart your server if it doesn't). Check in a notebook:
+
+```python
+import sys, ctxwgcna
+print(sys.executable)    # should end in adapt_WGCNA/.venv/bin/python
+```
+
+- `--user` writes `~/.local/share/jupyter/kernels/ctxwgcna/kernel.json`, which points to the venv's
+  Python by absolute path. On JupyterHub, the venv must therefore be created **on the machine (or
+  shared file system) where your Jupyter server runs**; a venv built on a Mac does not run on a
+  Linux hub.
+- If you move or recreate the venv, rerun the `ipykernel install` line (it overwrites the entry).
+- ctxwgcna is installed in editable mode (`-e`): code changes take effect after a kernel restart.
+- Other packages your notebooks need go into the same venv, e.g.
+  `uv pip install --python .venv/bin/python scanpy`.
+- Remove the kernel with `jupyter kernelspec uninstall ctxwgcna`.
+
 ### Dependency notes
 | Package | Why | Note |
 |---|---|---|
@@ -85,6 +113,7 @@ overlapping submodules.
 | `anndata` | reading `.h5ad` files (optional) | `[anndata]` extra; AnnData objects are detected without importing it. Also in `[test]`. |
 | `scikit-learn`, `pytest` | tests only | installed by the `[test]` extra |
 | `matplotlib` | README figure only | installed by the `[docs]` extra; not needed for the analysis |
+| `ipykernel` | Jupyter kernel | `[jupyter]` extra (together with `anndata`); see "Use in Jupyter / JupyterHub" |
 
 PyWGCNA is **not** a dependency. Its `cutreeHybrid` disagreed with R on identical input, and the
 one function still needed (the scale-free fit index) is reimplemented in `ctxwgcna.network`,
