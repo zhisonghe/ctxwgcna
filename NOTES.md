@@ -1,4 +1,4 @@
-# adapt_WGCNA
+# ctxwgcna development notes
 
 Context-aware WGCNA: a *union* of context-specific co-expression (systems or conditions as contexts),
 with a TOM that only lets shared neighbours count when the links come from the same context.

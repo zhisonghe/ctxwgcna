@@ -49,10 +49,18 @@ per-context similarity ──► Fisher z, standardized ──► top-n contexts
 
 Requirements: Python 3.10–3.14 (the test suite passes on all five; 3.12 is a good default), macOS or Linux.
 
+### Get the code
+
+```bash
+git clone https://github.com/zhisonghe/ctxwgcna.git
+cd ctxwgcna
+```
+
+All commands below are run from this folder.
+
 ### With uv (recommended)
 
 ```bash
-cd /path/to/adapt_WGCNA
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[test]"
 source .venv/bin/activate
@@ -61,7 +69,6 @@ source .venv/bin/activate
 ### With pip
 
 ```bash
-cd /path/to/adapt_WGCNA
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[test]"
@@ -82,7 +89,6 @@ Install the `[jupyter]` extra (`ipykernel`, plus `anndata` to read `.h5ad` files
 venv as a kernel:
 
 ```bash
-cd /path/to/adapt_WGCNA
 uv pip install --python .venv/bin/python -e ".[jupyter]"     # or: pip install -e ".[jupyter]"
 .venv/bin/python -m ipykernel install --user --name ctxwgcna --display-name "Python (ctxwgcna)"
 ```
@@ -92,7 +98,7 @@ the page, or restart your server if it doesn't). Check in a notebook:
 
 ```python
 import sys, ctxwgcna
-print(sys.executable)    # should end in adapt_WGCNA/.venv/bin/python
+print(sys.executable)    # should end in ctxwgcna/.venv/bin/python
 ```
 
 - `--user` writes `~/.local/share/jupyter/kernels/ctxwgcna/kernel.json`, which points to the venv's
