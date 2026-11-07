@@ -353,6 +353,56 @@ def test_dominance_rejects_nan_rows():
     assert len(rows) == 19 and rows["fold"].notna().all()
 
 
+def test_dominance_nan_options(dominance_data):
+    fc, obs = dominance_data
+    fc = fc.copy()
+    untested = fc.index[obs.condition == "c003"][:2]
+    fc.loc[untested] = np.nan
+    keep = fc.notna().any(axis=1)
+    ref_rows, ref_sum = detect_dominant(fc[keep], obs[keep], verbose=False)
+    # skip: identical to dropping the all-NaN rows; those rows come back unscored, never dominant
+    rows, summary = detect_dominant(fc, obs, nan="skip", verbose=False)
+    pd.testing.assert_frame_equal(rows.loc[keep], ref_rows)
+    assert rows.loc[untested, "fold"].isna().all() and not rows.loc[untested, "dominant"].any()
+    assert summary.loc["c003", "n_contexts"] == ref_sum.loc["c003", "n_contexts"]
+    assert rows.attrs["preprocessing"]["n_all_nan_rows"] == 2
+    # fill: NaN -> 0, untested rows are scored as "no change"
+    rows0, _ = detect_dominant(fc, obs, nan=0, verbose=False)
+    assert (rows0.loc[untested, "fold"] == 0).all()
+    # skip with a few NaN genes in a dominant row: still flagged
+    fc2 = fc[keep].copy()
+    dom_row = ref_rows.index[ref_rows.dominant][0]
+    fc2.loc[dom_row, fc2.columns[:5]] = np.nan
+    rows2, _ = detect_dominant(fc2, obs[keep], nan="skip", verbose=False)
+    assert rows2.loc[dom_row, "dominant"]
+    with pytest.raises(ValueError, match="nan='skip'"):
+        detect_dominant(fc, obs, verbose=False)
+    with pytest.raises(ValueError, match="nan must be"):
+        detect_dominant(fc, obs, nan="drop", verbose=False)
+
+
+def test_dominance_clip_options(dominance_data):
+    fc, obs = dominance_data
+    a, _ = detect_dominant(fc, obs, clip=2, verbose=False)
+    b, _ = detect_dominant(fc.clip(-2, 2), obs, verbose=False)
+    pd.testing.assert_frame_equal(a, b)
+    c, _ = detect_dominant(fc, obs, clip=(-2, 2), verbose=False)
+    pd.testing.assert_frame_equal(a, c)
+    p, _ = detect_dominant(fc, obs, clip="p95", verbose=False)
+    lo, hi = p.attrs["preprocessing"]["clip_bounds"]
+    assert np.isclose(hi, np.percentile(np.abs(fc.to_numpy()), 95)) and lo == -hi
+    assert abs(p.attrs["preprocessing"]["frac_clipped"] - 0.05) < 0.01
+    # infinite values are accepted once clipped
+    fc_inf = fc.copy()
+    fc_inf.iloc[0, 0] = np.inf
+    with pytest.raises(ValueError, match="infinite"):
+        detect_dominant(fc_inf, obs, verbose=False)
+    detect_dominant(fc_inf, obs, clip=5, verbose=False)
+    for bad in ("q95", "p0", -1, (2, -2)):
+        with pytest.raises(ValueError):
+            detect_dominant(fc, obs, clip=bad, verbose=False)
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

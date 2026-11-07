@@ -57,6 +57,11 @@ def parse_args(argv=None):
     d.add_argument("--dominant-min-z", type=float, default=4.0)
     d.add_argument("--dominant-min-gene-frac", type=float, default=0.10)
     d.add_argument("--dominant-max-frac", type=float, default=0.05)
+    d.add_argument("--dominant-nan", default="raise",
+                   help="NaN in the dominance scoring: raise, skip, or a fill value such as 0")
+    d.add_argument("--dominant-clip", default=None,
+                   help="clip FCs for the dominance scoring only: C (+-C), LO,HI (write --dominant-clip=-3,3), "
+                        "or a percentile of |FC| such as p95")
 
     c = p.add_argument_group("contexts and similarity")
     c.add_argument("--context-col", default="system")
@@ -117,6 +122,19 @@ def load_data(args):
     return fc, obs, None
 
 
+def _nan_option(text):
+    """'raise' / 'skip' stay strings; anything else is a fill value."""
+    return text if text in ("raise", "skip") else float(text)
+
+
+def _clip_option(text):
+    """None, 'pNN', 'C' or 'LO,HI' -> the clip argument of detect_dominant."""
+    if text is None or text.startswith("p"):
+        return text
+    parts = [float(v) for v in text.split(",")]
+    return parts[0] if len(parts) == 1 else tuple(parts)
+
+
 def dominance_step(args, fc, obs, out):
     """Detect dominant FC profiles, write the reports, and remove them if --exclude-dominant.
 
@@ -126,7 +144,8 @@ def dominance_step(args, fc, obs, out):
     rows, summary = detect_dominant(
         fc, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
         min_z=args.dominant_min_z, min_gene_frac=args.dominant_min_gene_frac,
-        max_frac=args.dominant_max_frac)
+        max_frac=args.dominant_max_frac, nan=_nan_option(args.dominant_nan),
+        clip=_clip_option(args.dominant_clip))
     rows.to_csv(out("dominance_rows.csv"))
     if summary is not None:
         summary.to_csv(out("dominance_summary.csv"))

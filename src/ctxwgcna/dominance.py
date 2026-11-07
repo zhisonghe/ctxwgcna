@@ -21,6 +21,7 @@ Magnitude is measured as distance from 0, so this assumes FC-like data (0 = no c
 expression matrix, centre each gene within its context first.
 """
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -38,30 +39,41 @@ def _robust_gene_z(X):
     would cap |z| at (n-1)/sqrt(n) (4.3 for n = 20), so a gene that changes only in the scored row
     could never count as extreme in a small context. A gene flat in all other rows but changed in this
     one gets z = +-inf (extreme).
+
+    NaN entries (nan='skip') are ignored in the medians and sums and get z = NaN (never extreme).
     """
-    n = X.shape[0]
-    med = np.median(X, axis=0)
-    mad = MAD_TO_SD * np.median(np.abs(X - med), axis=0)
-    with np.errstate(invalid="ignore", divide="ignore"):
+    valid = ~np.isnan(X)
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN gene columns: nanmedian warns
+        med = np.nanmedian(X, axis=0)
+        mad = MAD_TO_SD * np.nanmedian(np.abs(X - med), axis=0)
         Z = np.where(mad > 0, (X - med) / mad, 0.0)
         flat = mad == 0
-        if flat.any() and n > 2:
-            Y = X[:, flat]
+        if flat.any():
+            Y = np.where(valid[:, flat], X[:, flat], 0.0)
+            n = valid[:, flat].sum(axis=0)  # observed rows per gene (= n_rows without NaN)
             # leave-one-out mean and (unbiased) variance of each column, for every left-out row
             S, Q = Y.sum(axis=0), (Y ** 2).sum(axis=0)
             m_loo = (S - Y) / (n - 1)
             var_loo = np.maximum((Q - Y ** 2) / (n - 1) - m_loo ** 2, 0.0) * (n - 1) / (n - 2)
-            sd_loo = np.sqrt(var_loo)
+            sd_loo = np.where(n > 2, np.sqrt(var_loo), 0.0)
             dev = Y - med[flat]
             tiny = 1e-12 * max(1.0, np.abs(Y).max())  # rounding noise of the sums
-            Z[:, flat] = np.where(sd_loo > tiny, dev / np.maximum(sd_loo, tiny),
-                                  np.where(np.abs(dev) > tiny, np.sign(dev) * np.inf, 0.0))
+            z_flat = np.where(sd_loo > tiny, dev / np.maximum(sd_loo, tiny),
+                              np.where(np.abs(dev) > tiny, np.sign(dev) * np.inf, 0.0))
+            Z[:, flat] = np.where(n > 2, z_flat, 0.0)  # <= 2 observed rows: no spread to compare with
+    Z[~valid] = np.nan
     return Z
 
 
 def _magnitude_scores(X):
-    """Per row: sum of squares, fold over the context median, and robust z of log2(fold)."""
-    ss = (X ** 2).sum(axis=1)
+    """Per row: sum of squares, fold over the context median, and robust z of log2(fold).
+
+    With NaN entries (nan='skip') the sum of squares is taken over the observed genes and scaled up
+    to all genes (mean square x n_genes), so rows with a few missing genes stay comparable.
+    """
+    n_valid = (~np.isnan(X)).sum(axis=1)
+    ss = np.nansum(X ** 2, axis=1) * (X.shape[1] / n_valid)
     ref = np.median(ss)
     if ref == 0:
         # more than half the rows have no change at all: any changed row is infinitely larger than
@@ -76,11 +88,72 @@ def _magnitude_scores(X):
     return ss, fold, centred / mad
 
 
+def _clip_bounds(X, clip):
+    """(lo, hi, description) for `clip`: None, c (-> +-c), (lo, hi), or 'pNN' (+- NNth pct of |X|)."""
+    if clip is None:
+        return None
+    if isinstance(clip, str):
+        if not (clip.startswith("p") and _is_number(clip[1:]) and 0 < float(clip[1:]) <= 100):
+            raise ValueError(f"clip={clip!r}: a string must be a percentile like 'p95' or 'p99.5'")
+        finite = np.abs(X[np.isfinite(X)])
+        c = float(np.percentile(finite, float(clip[1:]))) if finite.size else 0.0
+        if c <= 0:
+            raise ValueError(f"clip={clip!r} gives a cutoff of {c}; use a higher percentile or a value")
+        return -c, c, f"+-{c:.3g} ({clip} of |FC|)"
+    if np.isscalar(clip):
+        if not clip > 0:
+            raise ValueError("clip as a single value must be > 0 (it is used as +-clip)")
+        return -float(clip), float(clip), f"+-{float(clip):.3g}"
+    lo, hi = (float(v) for v in clip)
+    if not lo < hi:
+        raise ValueError("clip=(lo, hi) needs lo < hi")
+    return lo, hi, f"[{lo:.3g}, {hi:.3g}]"
+
+
+def _is_number(text):
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _prepare_values(X, index, nan, clip):
+    """Apply the NaN rule and clipping. Returns (X, scored rows mask, info dict for rows.attrs)."""
+    is_nan = np.isnan(X)
+    all_nan = is_nan.all(axis=1)
+    info = {"nan": nan, "n_nan_rows": int(is_nan.any(axis=1).sum()), "n_all_nan_rows": int(all_nan.sum()),
+            "clip": clip, "clip_bounds": None, "frac_clipped": 0.0}
+    if isinstance(nan, str):
+        if nan == "raise":
+            try:
+                check_finite(np.where(np.isinf(X), 0.0, X), index)  # inf is checked after clipping
+            except ValueError as err:
+                raise ValueError(f"{err} Or pass nan='skip' (ignore them) or nan=0 (fill).") from None
+        elif nan != "skip":
+            raise ValueError("nan must be 'raise', 'skip' or a fill value (e.g. 0)")
+        scored = ~all_nan  # 'skip': all-NaN rows are not scored; other NaNs are ignored per entry
+    else:
+        X = np.where(is_nan, float(nan), X)  # fill
+        scored = np.ones(len(X), dtype=bool)
+    bounds = _clip_bounds(X, clip)
+    if bounds is not None:
+        lo, hi, desc = bounds
+        observed = ~np.isnan(X)
+        info["frac_clipped"] = float(((X < lo) | (X > hi))[observed].mean()) if observed.any() else 0.0
+        info["clip_bounds"] = (lo, hi)
+        info["clip_desc"] = desc
+        X = np.clip(X, lo, hi)
+    if np.isinf(X).any():
+        raise ValueError("fc contains infinite values; pass clip=... or cap them first")
+    return X, scored, info
+
+
 def _score_context(X, min_fold, min_z, min_gene_frac, extreme_z, max_frac):
     """Score the rows of one context. Returns (columns dict, n_candidates, cap)."""
     ss, fold, robust_z = _magnitude_scores(X)
     n_extreme = (np.abs(_robust_gene_z(X)) >= extreme_z).sum(axis=1)  # breadth
-    frac_extreme = n_extreme / X.shape[1]
+    frac_extreme = n_extreme / (~np.isnan(X)).sum(axis=1)  # of the observed genes
     candidate = (fold >= min_fold) & (robust_z >= min_z) & (frac_extreme >= min_gene_frac)
 
     # cap: flag at most max_frac of the rows (at least 1), the largest folds first
@@ -104,7 +177,7 @@ def _summarise_by_label(rows, min_gene_frac):
     g = rows.groupby("label", sort=False)
     fe = g["frac_extreme"]
     summary = pd.DataFrame({
-        "n_contexts": g.size(), "n_dominant": g["dominant"].sum().astype(int),
+        "n_contexts": g["fold"].count(), "n_dominant": g["dominant"].sum().astype(int),
         "n_broad": (rows["frac_extreme"] >= min_gene_frac).groupby(rows["label"], sort=False).sum().astype(int),
         "max_fold": g["fold"].max(), "median_fold": g["fold"].median(),
         "max_frac_extreme": fe.max(), "median_frac_extreme": fe.median(),
@@ -114,7 +187,8 @@ def _summarise_by_label(rows, min_gene_frac):
 
 
 def detect_dominant(fc, obs=None, context_col="system", label_col="condition", min_fold=5.0, min_z=4.0,
-                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, verbose=True, layer=None, genes=None):
+                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, nan="raise", clip=None, verbose=True,
+                    layer=None, genes=None):
     """Flag dominant FC profiles.
 
     :param fc: DataFrame, rows = observations (FC profiles), columns = genes; or AnnData.
@@ -131,10 +205,19 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
     :param max_frac: at most this fraction of a context's rows (at least 1) is flagged. If more rows
         pass, the strongest are flagged, the rest are reported as candidates, and a warning is printed:
         dominance that widespread is not a few outliers, and removal may not be appropriate.
+    :param nan: how to treat missing values. 'raise' (default): error. 'skip': rows that are entirely
+        NaN (e.g. untested combinations) are not scored (metrics NaN, never dominant); other NaN
+        entries are ignored (sum of squares scaled to all genes, frac_extreme over observed genes).
+        A number, e.g. 0: fill NaN with it (0 = "no change").
+    :param clip: limit extreme FCs before scoring, so that a few unstable values (e.g. capped at
+        +-10) do not dominate the sum of squares. None (default): no clipping. c: clip to [-c, c].
+        (lo, hi): clip to [lo, hi]. 'p95' (any percentile 'pNN'): clip to +- that percentile of |FC|
+        over all observed values. Applies to the scoring only; fc itself is not changed.
 
     Returns (rows, summary):
       rows     one row per FC profile: context, label, ss, fold (ss / context median), robust_z,
                n_extreme, frac_extreme, candidate (passes all thresholds), dominant (flagged after cap)
+      rows.attrs['preprocessing'] records the NaN rule and clipping used (bounds, fraction clipped).
       summary  per label (if label_col given): n_contexts, n_dominant, frac_dominant, n_broad
                (contexts with frac_extreme >= min_gene_frac), max_fold, median_fold, and the max /
                median / mean / min of frac_extreme; sorted by n_dominant then max_fold
@@ -148,26 +231,41 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
             raise ValueError(f"{col!r} is not a column of obs (pass label_col=None to skip the summary)")
     if not fc.index.equals(obs.index):
         obs = obs.loc[fc.index]
-    X_all = fc.to_numpy(dtype=np.float64)
-    # a single NaN row would make its context's median magnitude NaN and silently flag nothing there
-    check_finite(X_all, fc.index)
+    # NaN rule (a NaN left in would make its context's median magnitude NaN and flag nothing there)
+    # and optional clipping of extreme values
+    X_all, scored, info = _prepare_values(fc.to_numpy(dtype=np.float64), fc.index, nan, clip)
     ctx = obs[context_col].to_numpy()
 
     parts, capped = [], []  # capped: (context, n_candidates, cap) where the cap was hit
     for c in pd.unique(ctx):
-        in_context = ctx == c
-        cols, n_cand, cap = _score_context(X_all[in_context], min_fold, min_z, min_gene_frac,
-                                           extreme_z, max_frac)
-        if n_cand > cap:
-            capped.append((c, n_cand, cap))
-        part = pd.DataFrame({"context": c, **cols}, index=fc.index[in_context])
+        in_context = (ctx == c) & scored
+        unscored = (ctx == c) & ~scored  # all-NaN rows with nan='skip'
+        if in_context.any():
+            cols, n_cand, cap = _score_context(X_all[in_context], min_fold, min_z, min_gene_frac,
+                                               extreme_z, max_frac)
+            if n_cand > cap:
+                capped.append((c, n_cand, cap))
+            part = pd.DataFrame({"context": c, **cols}, index=fc.index[in_context])
+        else:
+            part = pd.DataFrame(index=fc.index[:0])
+        if unscored.any():
+            blank = pd.DataFrame({"context": c, "ss": np.nan, "fold": np.nan, "robust_z": np.nan,
+                                  "n_extreme": 0, "frac_extreme": np.nan, "candidate": False,
+                                  "dominant": False}, index=fc.index[unscored])
+            part = blank if part.empty else pd.concat([part, blank])
         if label_col is not None:
             part.insert(1, "label", obs.loc[part.index, label_col].to_numpy())
         parts.append(part)
     rows = pd.concat(parts).loc[fc.index]  # back to the input row order
+    rows.attrs["preprocessing"] = info
     summary = _summarise_by_label(rows, min_gene_frac) if label_col is not None else None
 
     if verbose:
+        if info["n_nan_rows"] and nan != "raise":
+            how = "not scored / ignored per entry" if nan == "skip" else f"filled with {nan}"
+            print(f"NaN: {info['n_nan_rows']} rows contain NaN ({info['n_all_nan_rows']} entirely); {how}.")
+        if info["clip_bounds"] is not None:
+            print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
         n_dom = int(rows["dominant"].sum())
         print(f"Dominance (min_fold={min_fold}, min_z={min_z}, min_gene_frac={min_gene_frac}, "
               f"max_frac={max_frac}): {n_dom} of {len(rows)} FC profiles flagged in "
