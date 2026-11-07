@@ -451,6 +451,16 @@ def test_linear_fc_warning(dominance_data, capsys):
     assert a["dominant"].equals(b["dominant"])
 
 
+def test_cli_fc_alias():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_ctxwgcna", "scripts/run_ctxwgcna.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    for flag in ("--data", "--fc"):
+        args = cli.parse_args([flag, "x.csv", "--obs", "o.csv", "--outdir", "out"])
+        assert args.data == "x.csv"
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

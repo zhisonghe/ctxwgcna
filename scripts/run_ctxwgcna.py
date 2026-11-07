@@ -35,7 +35,7 @@ def read_table(path, sep):
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     io = p.add_argument_group("input / output")
-    io.add_argument("--data", "--data", dest="data",
+    io.add_argument("--data", "--fc", dest="data",
                     help="data matrix (csv/tsv): log FC (or expression), rows = observations, columns = genes")
     io.add_argument("--obs", help="observation table (csv/tsv), same row index as --data")
     io.add_argument("--transpose", action="store_true", help="--data has genes as rows; transpose it")
