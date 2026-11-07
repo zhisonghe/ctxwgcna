@@ -183,8 +183,14 @@ passing an AnnData object needs nothing extra. On the command line use `--h5ad d
 ### Recommendations
 - **Values:** log2 FC. Prefer shrunken estimates (e.g. DESeq2 `lfcShrink`, apeglm/ashr) so noisy
   low-count genes don't produce extreme FCs that dominate correlations.
-- **No missing values:** NaN raises an error. Drop affected genes, or fill with 0 only if "not
-  measured" really means "no change".
+- **No missing values:** NaN raises an error (in `ContextWGCNA` and `detect_dominant`). Rows that
+  are entirely NaN usually mark combinations that were never tested (e.g. a condition with too few
+  cells in one system): drop them (`keep = fc.notna().any(axis=1); fc, obs = fc[keep], obs[keep]`).
+  For partly-NaN rows, drop the affected genes, or fill with 0 only if "not measured" really means
+  "no change".
+- **Capped FCs:** if unstable FCs were capped (e.g. at ±10), many genes sitting at the cap dominate
+  both the correlations and the dominance magnitude (a sum of squares: one gene at 10 counts as much
+  as 100 genes at 1). Use shrunken FCs, or cap at a lower value (e.g. ±3–5) before the analysis.
 - **Gene filtering:** memory and time grow with genes² (section 7). About 1,000–5,000 genes is
   comfortable. Filter for genes with meaningful FC variation (e.g. FC variance, or differentially
   expressed in at least one context), not for genes correlated with something.
@@ -267,10 +273,24 @@ flagged, the rest are marked `candidate`, and a **warning** is printed. "Dominan
 is a continuum, not a few outliers, and removing rows is then the wrong tool: inspect the table,
 raise `min_fold`, or reconsider.
 
-Outputs: `rows` (per profile: `fold`, `robust_z`, `n_extreme`, `frac_extreme`, `candidate`,
-`dominant`) and `summary` (per condition: `n_dominant` of `n_contexts` systems, `max_fold`,
-`median_fold`, `max_frac_extreme`). The script writes them to `dominance_rows.csv` and
-`dominance_summary.csv`.
+Outputs (the script writes them to `dominance_rows.csv` and `dominance_summary.csv`):
+
+| Table | Column | Meaning |
+|---|---|---|
+| `rows` (one per profile) | `ss` | sum of squared FC over all genes: the profile's size |
+| | `fold` | `ss` / median `ss` of the context's profiles (5 = five times a typical profile) |
+| | `robust_z` | how unusual `log2(fold)` is within the context, in robust SDs |
+| | `n_extreme`, `frac_extreme` | number / fraction of genes whose FC here is \|robust z\| ≥ `extreme_z` away from that gene's typical FC in the context |
+| | `candidate`, `dominant` | passes all three criteria; flagged after the `max_frac` cap |
+| `summary` (one per condition) | `n_contexts` | contexts in which the condition has a profile (**not** where it is dominant) |
+| | `n_dominant`, `frac_dominant` | contexts in which it is flagged |
+| | `max_fold`, `median_fold`, `max_frac_extreme` | its largest / median `fold` and largest `frac_extreme` across contexts |
+
+`fold` measures squared magnitude, not the number of changed genes, so it does not rank conditions
+the same way as their DEG counts do: 100 genes at FC 1 add as much as one gene at FC 10.
+`frac_extreme` is closer to "how many genes respond". Loosening the thresholds far below the
+defaults (e.g. `extreme_z=1`, which a third of all genes pass in an ordinary profile) turns the
+test into a ranking: `max_frac` then simply flags the largest profiles of every context.
 
 **Analysing the flagged conditions separately.** One condition is a single data point per system,
 so it has no correlation structure of its own. Take its responder genes (`|FC|` large, ideally

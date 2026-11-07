@@ -337,6 +337,17 @@ def test_dominance_validates_columns_and_labels():
         detect_dominant(fc.iloc[[0, 0, 1]], obs.iloc[[0, 0, 1]], verbose=False)
 
 
+def test_dominance_rejects_nan_rows():
+    # one untested (all-NaN) row used to make its whole context unscorable without any message
+    fc, obs = _single_context(np.random.default_rng(0).normal(size=(20, 30)))
+    fc.iloc[3] = np.nan
+    with pytest.raises(ValueError, match="entirely NaN"):
+        detect_dominant(fc, obs, verbose=False)
+    keep = fc.notna().any(axis=1)
+    rows, _ = detect_dominant(fc[keep], obs[keep], verbose=False)
+    assert len(rows) == 19 and rows["fold"].notna().all()
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

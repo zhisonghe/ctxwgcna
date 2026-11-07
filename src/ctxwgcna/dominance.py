@@ -25,7 +25,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .data import as_frames, check_unique, is_anndata
+from .data import as_frames, check_finite, check_unique, is_anndata
 
 MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
 
@@ -141,6 +141,8 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
     if not fc.index.equals(obs.index):
         obs = obs.loc[fc.index]
     X_all = fc.to_numpy(dtype=np.float64)
+    # a single NaN row would make its context's median magnitude NaN and silently flag nothing there
+    check_finite(X_all, fc.index)
     ctx = obs[context_col].to_numpy()
 
     parts, capped = [], []  # capped: (context, n_candidates, cap) where the cap was hit

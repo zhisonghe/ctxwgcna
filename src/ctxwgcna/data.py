@@ -88,6 +88,28 @@ def check_unique(fc, obs=None):
             raise ValueError(f"duplicated {what} labels, e.g. {examples}; labels must be unique")
 
 
+def check_finite(values, index):
+    """Raise if the (n_obs, n_genes) array `values` has NaN or infinite entries.
+
+    Rows that are entirely NaN usually mark combinations that were never tested (e.g. a condition
+    with too few cells in one system); the message counts them and shows how to drop them, since
+    filling them with 0 would claim "no change" where nothing was measured.
+    """
+    nan = np.isnan(values)
+    if nan.any():
+        all_nan = nan.all(axis=1)
+        msg = (f"fc contains NaN in {int(nan.any(axis=1).sum())} of {len(values)} rows "
+               f"({int(all_nan.sum())} of them entirely NaN, e.g. {list(index[all_nan][:3])}).")
+        if all_nan.any():
+            msg += " Drop untested rows first, e.g. keep = fc.notna().any(axis=1); fc, obs = fc[keep], obs[keep]."
+        if (nan.any(axis=1) & ~all_nan).any():
+            msg += (" Partly-NaN rows: drop the affected genes, or fill with 0 only if 'not measured' "
+                    "really means 'no change'.")
+        raise ValueError(msg)
+    if not np.isfinite(values).all():
+        raise ValueError("fc contains infinite values; cap or filter them first")
+
+
 def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
     """Group the rows of `fc` by `obs[context_col]`.
 
@@ -114,10 +136,7 @@ def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
     if context_col not in obs.columns:
         raise ValueError(f"{context_col!r} is not a column of obs")
     values = fc.to_numpy(dtype=np.float64)
-    if np.isnan(values).any():
-        raise ValueError("fc contains NaN; impute or filter before building contexts")
-    if not np.isfinite(values).all():
-        raise ValueError("fc contains infinite values; cap or filter them before building contexts")
+    check_finite(values, fc.index)
 
     labels = obs[context_col]
     names = list(pd.unique(labels)) if contexts is None else list(contexts)
