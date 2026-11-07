@@ -95,13 +95,20 @@ def _score_context(X, min_fold, min_z, min_gene_frac, extreme_z, max_frac):
     return cols, int(candidate.sum()), cap
 
 
-def _summarise_by_label(rows):
-    """Per label (e.g. condition): in how many contexts it is dominant, and how large it is."""
+def _summarise_by_label(rows, min_gene_frac):
+    """Per label (e.g. condition): in how many contexts it is dominant, how large and how broad it is.
+
+    Breadth (frac_extreme) is summarised more fully than size: it tracks the number of responding
+    genes, and n_broad counts the contexts where it passes the breadth criterion on its own.
+    """
     g = rows.groupby("label", sort=False)
+    fe = g["frac_extreme"]
     summary = pd.DataFrame({
         "n_contexts": g.size(), "n_dominant": g["dominant"].sum().astype(int),
+        "n_broad": (rows["frac_extreme"] >= min_gene_frac).groupby(rows["label"], sort=False).sum().astype(int),
         "max_fold": g["fold"].max(), "median_fold": g["fold"].median(),
-        "max_frac_extreme": g["frac_extreme"].max()})
+        "max_frac_extreme": fe.max(), "median_frac_extreme": fe.median(),
+        "mean_frac_extreme": fe.mean(), "min_frac_extreme": fe.min()})
     summary.insert(2, "frac_dominant", summary["n_dominant"] / summary["n_contexts"])
     return summary.sort_values(["n_dominant", "max_fold"], ascending=False)
 
@@ -128,8 +135,9 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
     Returns (rows, summary):
       rows     one row per FC profile: context, label, ss, fold (ss / context median), robust_z,
                n_extreme, frac_extreme, candidate (passes all thresholds), dominant (flagged after cap)
-      summary  per label (if label_col given): n_contexts, n_dominant, frac_dominant, max_fold,
-               median_fold, max_frac_extreme; sorted by n_dominant then max_fold
+      summary  per label (if label_col given): n_contexts, n_dominant, frac_dominant, n_broad
+               (contexts with frac_extreme >= min_gene_frac), max_fold, median_fold, and the max /
+               median / mean / min of frac_extreme; sorted by n_dominant then max_fold
     """
     fc, obs = as_frames(fc, obs, layer=layer, genes=genes)
     if obs is None:
@@ -157,7 +165,7 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
             part.insert(1, "label", obs.loc[part.index, label_col].to_numpy())
         parts.append(part)
     rows = pd.concat(parts).loc[fc.index]  # back to the input row order
-    summary = _summarise_by_label(rows) if label_col is not None else None
+    summary = _summarise_by_label(rows, min_gene_frac) if label_col is not None else None
 
     if verbose:
         n_dom = int(rows["dominant"].sum())

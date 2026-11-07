@@ -264,6 +264,11 @@ def test_detects_multiple_and_system_specific_dominant_profiles(dominance_data):
     expected = obs.condition.isin(["c000", "c001"]) | ((obs.condition == "c002") & obs.system.isin(["sys0", "sys1"]))
     assert rows["dominant"].equals(pd.Series(expected.to_numpy(), index=fc.index, name="dominant"))
     assert summary.loc["c002", "n_dominant"] == 2
+    # breadth summaries agree with the per-row values
+    fe = rows.groupby("label")["frac_extreme"]
+    for stat in ("max", "median", "mean", "min"):
+        assert np.allclose(summary[f"{stat}_frac_extreme"], fe.agg(stat).loc[summary.index])
+    assert summary.loc["c002", "n_broad"] >= 2 and summary.loc["c010", "n_broad"] == 0
     # large but narrow (6% of genes) is kept: that is how a genuine few-condition programme looks
     assert not rows.loc[obs.condition == "c010", "dominant"].any()
     assert rows.loc[obs.condition == "c010", "fold"].min() > 5  # ...although its magnitude is large

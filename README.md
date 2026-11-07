@@ -284,7 +284,9 @@ Outputs (the script writes them to `dominance_rows.csv` and `dominance_summary.c
 | | `candidate`, `dominant` | passes all three criteria; flagged after the `max_frac` cap |
 | `summary` (one per condition) | `n_contexts` | contexts in which the condition has a profile (**not** where it is dominant) |
 | | `n_dominant`, `frac_dominant` | contexts in which it is flagged |
-| | `max_fold`, `median_fold`, `max_frac_extreme` | its largest / median `fold` and largest `frac_extreme` across contexts |
+| | `n_broad` | contexts in which it passes the breadth criterion (`frac_extreme` ≥ `min_gene_frac`), flagged or not |
+| | `max_fold`, `median_fold` | its largest / median `fold` across contexts |
+| | `max_frac_extreme`, `median_frac_extreme`, `mean_frac_extreme`, `min_frac_extreme` | the same for `frac_extreme`; a high minimum means broad in every context |
 
 `fold` measures squared magnitude, not the number of changed genes, so it does not rank conditions
 the same way as their DEG counts do: 100 genes at FC 1 add as much as one gene at FC 10.
