@@ -43,7 +43,9 @@ class ContextWGCNA:
         complete rows. A number, e.g. 0: fill NaN with it.
     :param clip: limit extreme values before the correlations: None (default), c (clip to [-c, c]),
         (lo, hi), or 'pNN' (+- the NNth percentile of |value| over all values, e.g. 'p95').
-        .data / .obs hold the data after this step; .preprocessing records what was done.
+    :param max_abs: treat |value| > max_abs as missing measurements (e.g. 15 for the |LFC| ~ 20-35 a
+        GLM returns when one group has zero counts); they are set to 0 (or to nan if it is a number),
+        before clipping. .data / .obs hold the data after these steps; .preprocessing records them.
     See README.md section 4 for all parameters.
     """
 
@@ -51,12 +53,12 @@ class ContextWGCNA:
                  network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
                  tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
                  store_context_t="auto", store_max_mb=2048, layer=None, genes=None, nan="raise",
-                 clip=None):
+                 clip=None, max_abs=None):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
         data, obs = as_frames(data, obs, layer=layer, genes=genes)
-        data, obs, self.preprocessing = prepare_frames(data, obs, nan=nan, clip=clip)  # NaN rule, clipping
+        data, obs, self.preprocessing = prepare_frames(data, obs, nan=nan, clip=clip, max_abs=max_abs)
         if similarity == "cosine":  # uncentred: needs 0 = "no change"
             warn_if_linear_fc(data.to_numpy(dtype=np.float64), "similarity='cosine'")
         self.data, self.obs, self.layer = data, obs, layer
@@ -211,14 +213,14 @@ class ContextWGCNA:
 
 def global_wgcna(data, similarity="pearson", network_type="signed", power=None, powers=None,
                  min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None,
-                 nan="raise", clip=None):
+                 nan="raise", clip=None, max_abs=None):
     """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
 
-    data is a DataFrame (observations x genes) or AnnData (with optional layer / genes / nan / clip, as
-    in ContextWGCNA). Returns (module labels, power used).
+    data is a DataFrame (observations x genes) or AnnData; layer, genes, nan, clip and max_abs work as
+    in ContextWGCNA. Returns (module labels, power used).
     """
     data, _ = as_frames(data, None, layer=layer, genes=genes)
-    data, _, _ = prepare_frames(data, None, nan=nan, clip=clip, verbose=False)
+    data, _, _ = prepare_frames(data, None, nan=nan, clip=clip, max_abs=max_abs, verbose=False)
     r = similarity_matrix(data.to_numpy(), similarity)
     if power is None:
         sft = _net.scale_free_table(r, _net.DEFAULT_POWERS if powers is None else powers, network_type)

@@ -138,3 +138,15 @@ dynamicTreeCut also applies `~` to Python bools (DeprecationWarning since 3.12, 
 but the branch only runs with minExternalSplit, which ctxwgcna doesn't use; the warning is filtered.
 Before Python 3.16, vendor a fixed copy of the tree cut (check dynamicTreeCut's license first).
 README now recommends 3.12.
+
+## max_abs: implausible GLM LFCs (2026-11-07)
+Real screen data (forebrain organoids, 12 cell types x 381 conditions, 9,100 genes): |LFC| has a
+gap between ~10 and ~20 and a cluster of 1.34M values (3.3%) at 20-35, i.e. GLM estimates for genes
+with zero counts in one group. They dominated the dominance magnitude (median 78% of a row's sum of
+squares came from them) and concentrated in conditions with untested cell types (too few cells).
+Masking |LFC| > 15 as missing: rank correlation of n_dominant with the conditions' DEG counts (top
+30 from a pooled test) 0.06 -> 0.76; flags identical for cutoffs 8-15, 7 extra artifact-driven flags
+at 20. Clipping (+-10, +-3) helped much less. Added max_abs to detect_dominant / ContextWGCNA /
+global_wgcna (masked -> ignored per entry in dominance, 0 in the network). DEG counts from a pooled
+test are not expected to match dominance fully: a condition with consistent moderate changes in all
+cell types gets many DEGs but no outsized row in any cell type.

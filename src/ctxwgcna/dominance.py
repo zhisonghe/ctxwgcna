@@ -26,7 +26,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .data import as_frames, check_unique, is_anndata, prepare_values, warn_if_linear_fc
+from .data import as_frames, check_unique, is_anndata, prepare_values, report_preparation, warn_if_linear_fc
 
 MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
 
@@ -126,7 +126,8 @@ def _summarise_by_label(rows, min_gene_frac):
 
 
 def detect_dominant(lfc, obs=None, context_col="system", label_col="condition", min_fold=5.0, min_z=4.0,
-                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, nan="raise", clip=None, verbose=True,
+                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, nan="raise", clip=None, max_abs=None,
+                    verbose=True,
                     layer=None, genes=None):
     """Flag dominant LFC profiles.
 
@@ -149,6 +150,10 @@ def detect_dominant(lfc, obs=None, context_col="system", label_col="condition", 
         NaN (e.g. untested combinations) are not scored (metrics NaN, never dominant); other NaN
         entries are ignored (sum of squares scaled to all genes, frac_extreme over observed genes).
         A number, e.g. 0: fill NaN with it (0 = "no change").
+    :param max_abs: treat |LFC| > max_abs as missing measurements (e.g. 15 for the |LFC| ~ 20-35 a GLM
+        returns when one group has zero counts). Masked values are ignored per entry like NaN under
+        'skip' (or filled with nan if it is a number) and never trigger nan='raise'. Applied before
+        clipping, so a 'pNN' clip is computed on the unmasked values.
     :param clip: limit extreme FCs before scoring, so that a few unstable values (e.g. capped at
         +-10) do not dominate the sum of squares. None (default): no clipping. c: clip to [-c, c].
         (lo, hi): clip to [lo, hi]. 'p95' (any percentile 'pNN'): clip to +- that percentile of |LFC|
@@ -173,7 +178,9 @@ def detect_dominant(lfc, obs=None, context_col="system", label_col="condition", 
         obs = obs.loc[lfc.index]
     # NaN rule (a NaN left in would make its context's median magnitude NaN and flag nothing there)
     # and optional clipping of extreme values
-    X_all, scored, info = prepare_values(lfc.to_numpy(dtype=np.float64), lfc.index, nan, clip)
+    masked_as = nan if not isinstance(nan, str) else "nan"  # masked entries: ignored, or filled like NaN
+    X_all, scored, info = prepare_values(lfc.to_numpy(dtype=np.float64), lfc.index, nan, clip,
+                                         max_abs=max_abs, masked_as=masked_as)
     if verbose:
         warn_if_linear_fc(X_all, "detect_dominant")
     ctx = obs[context_col].to_numpy()
@@ -203,11 +210,8 @@ def detect_dominant(lfc, obs=None, context_col="system", label_col="condition", 
     summary = _summarise_by_label(rows, min_gene_frac) if label_col is not None else None
 
     if verbose:
-        if info["n_nan_rows"] and nan != "raise":
-            how = "not scored / ignored per entry" if nan == "skip" else f"filled with {nan}"
-            print(f"NaN: {info['n_nan_rows']} rows contain NaN ({info['n_all_nan_rows']} entirely); {how}.")
-        if info["clip_bounds"] is not None:
-            print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
+        report_preparation(info, "" if nan == "raise" else "not scored / ignored per entry" if nan == "skip"
+                           else f"filled with {nan}")
         n_dom = int(rows["dominant"].sum())
         print(f"Dominance (min_fold={min_fold}, min_z={min_z}, min_gene_frac={min_gene_frac}, "
               f"max_frac={max_frac}): {n_dom} of {len(rows)} LFC profiles flagged in "

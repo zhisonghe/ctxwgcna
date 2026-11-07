@@ -140,23 +140,29 @@ def _is_number(text):
         return False
 
 
-def prepare_values(X, index, nan="raise", clip=None):
-    """Apply a NaN rule and optional clipping to an (n_obs, n_genes) array.
+def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="nan"):
+    """Apply a NaN rule, optional masking of implausible values, and optional clipping to an
+    (n_obs, n_genes) array, in that order.
 
     :param nan: 'raise' (error on NaN), 'skip' (all-NaN rows are marked unscored; other NaN entries
         are left in place for the caller to ignore), or a number to fill NaN with (e.g. 0).
+    :param max_abs: values with |x| > max_abs (including +-inf) are treated as missing measurements,
+        e.g. the |LFC| ~ 30 a GLM returns when one group has zero counts. They never trigger
+        nan='raise'; they become `masked_as`.
+    :param masked_as: 'nan' (left missing, for callers that ignore single entries) or a number.
     :param clip: None; c (clip to [-c, c]); (lo, hi); or 'pNN' (+- the NNth percentile of |X| over
-        all observed values). Infinite values are allowed only when they get clipped.
+        all observed, unmasked values). Infinite values are allowed only when masked or clipped.
     Returns (X, scored: bool mask of rows that hold data, info: dict describing what was done).
     """
     is_nan = np.isnan(X)
     all_nan = is_nan.all(axis=1)
     info = {"nan": nan, "n_nan_rows": int(is_nan.any(axis=1).sum()), "n_all_nan_rows": int(all_nan.sum()),
+            "max_abs": max_abs, "n_masked": 0, "frac_masked": 0.0,
             "clip": clip, "clip_bounds": None, "frac_clipped": 0.0}
     if isinstance(nan, str):
         if nan == "raise":
             try:
-                check_finite(np.where(np.isinf(X), 0.0, X), index)  # inf is checked after clipping
+                check_finite(np.where(np.isinf(X), 0.0, X), index)  # inf is checked after masking/clipping
             except ValueError as err:
                 raise ValueError(f"{err} Or pass nan='skip' (ignore them) or nan=0 (fill).") from None
         elif nan != "skip":
@@ -165,6 +171,17 @@ def prepare_values(X, index, nan="raise", clip=None):
     else:
         X = np.where(is_nan, float(nan), X)  # fill
         scored = np.ones(len(X), dtype=bool)
+    if max_abs is not None:
+        if not max_abs > 0:
+            raise ValueError("max_abs must be > 0")
+        with np.errstate(invalid="ignore"):
+            masked = np.abs(X) > max_abs  # NaN compares False
+        info["n_masked"] = int(masked.sum())
+        observed = ~np.isnan(X)
+        info["frac_masked"] = float(masked[observed].mean()) if observed.any() else 0.0
+        X = np.where(masked, np.nan if masked_as == "nan" else float(masked_as), X)
+        if masked_as == "nan":
+            scored &= ~np.isnan(X).all(axis=1)  # a row masked completely has nothing left to score
     bounds = _clip_bounds(X, clip)
     if bounds is not None:
         lo, hi, desc = bounds
@@ -174,8 +191,19 @@ def prepare_values(X, index, nan="raise", clip=None):
         info["clip_desc"] = desc
         X = np.clip(X, lo, hi)
     if np.isinf(X).any():
-        raise ValueError("data contains infinite values; pass clip=... or cap them first")
+        raise ValueError("data contains infinite values; pass max_abs=... or clip=..., or cap them first")
     return X, scored, info
+
+
+def report_preparation(info, nan_message):
+    """Print what prepare_values did (NaN rule, masking, clipping); nan_message describes the NaN rule."""
+    if info["n_nan_rows"] and nan_message:
+        print(f"NaN: {info['n_nan_rows']} rows contain NaN ({info['n_all_nan_rows']} entirely); {nan_message}.")
+    if info["max_abs"] is not None:
+        print(f"Masked |value| > {info['max_abs']:g}: {info['n_masked']} values "
+              f"({100 * info['frac_masked']:.2f}%), treated as missing.")
+    if info["clip_bounds"] is not None:
+        print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
 
 
 def warn_if_linear_fc(X, what):
@@ -191,31 +219,33 @@ def warn_if_linear_fc(X, what):
               "assumes log FC (0 = no change); pass log2(FC) instead.")
 
 
-def prepare_frames(data, obs, nan="raise", clip=None, verbose=True):
-    """NaN rule + clipping for the network: returns (data, obs, info) with all-NaN rows dropped.
+def prepare_frames(data, obs, nan="raise", clip=None, max_abs=None, verbose=True):
+    """NaN rule, masking and clipping for the network: returns (data, obs, info), all-NaN rows dropped.
 
     Unlike detect_dominant, nan='skip' cannot ignore single NaN entries here: correlations would need
     pairwise-complete observations (a different n per gene pair). Rows that are only partly NaN
-    therefore raise an error under 'skip'; fill them (nan=0) or drop the affected genes.
+    therefore raise an error under 'skip'; fill them (nan=0) or drop the affected genes. Values masked
+    by max_abs are filled with the nan value if it is a number, else with 0 ("no usable change").
     """
-    X, scored, info = prepare_values(data.to_numpy(dtype=np.float64), data.index, nan, clip)
+    masked_as = nan if not isinstance(nan, str) else 0.0
+    X, scored, info = prepare_values(data.to_numpy(dtype=np.float64), data.index, nan, clip,
+                                     max_abs=max_abs, masked_as=masked_as)
     if nan == "skip" and np.isnan(X[scored]).any():
         n_part = info["n_nan_rows"] - info["n_all_nan_rows"]
         raise ValueError(f"{n_part} rows are partly NaN; nan='skip' only drops rows that are entirely NaN. "
                          "Fill them (nan=0, if 'not measured' means 'no change') or drop the affected genes.")
-    if info["n_nan_rows"] == 0 and info["clip_bounds"] is None:
+    if info["n_nan_rows"] == 0 and info["n_masked"] == 0 and info["clip_bounds"] is None:
         return data, obs, info  # nothing changed: keep the caller's frame as is
     kept = data.index[scored]
     out = pd.DataFrame(X[scored], index=kept, columns=data.columns)
     if obs is not None:
         obs = obs[obs.index.isin(kept)]
     if verbose:
-        if info["n_all_nan_rows"] and nan == "skip":
-            print(f"NaN: dropped {info['n_all_nan_rows']} rows that are entirely NaN.")
-        elif info["n_nan_rows"] and nan not in ("raise", "skip"):
-            print(f"NaN: filled in {info['n_nan_rows']} rows with {nan}.")
-        if info["clip_bounds"] is not None:
-            print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
+        msg = ("rows that are entirely NaN dropped" if nan == "skip"
+               else f"filled with {nan}" if not isinstance(nan, str) else "")
+        report_preparation(info, msg)
+        if info["n_masked"]:
+            print(f"  (masked values set to {masked_as:g} for the correlations)")
     return out, obs, info
 
 

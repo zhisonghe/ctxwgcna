@@ -461,6 +461,39 @@ def test_cli_fc_alias():
         assert args.data == "x.csv"
 
 
+def test_max_abs_masking(dominance_data, small_data):
+    fc, obs = dominance_data
+    rng = np.random.default_rng(0)
+    art = rng.random(fc.shape) < 0.02  # GLM-style artifacts: |LFC| ~ 30 from zero counts
+    assert np.abs(fc.to_numpy()).max() < 25  # real effects in this fixture reach ~22
+    art[0, 0] = True
+    fc_art = fc.mask(art, 30.0 * np.sign(rng.standard_normal(fc.shape)))
+    fc_art.iloc[0, 0] = np.inf
+    expected, _ = detect_dominant(fc.mask(art), obs, nan="skip", verbose=False)
+    # masked entries are ignored like NaN, also under nan='raise' (they never trigger the error)
+    for nan in ("raise", "skip"):
+        rows, _ = detect_dominant(fc_art, obs, nan=nan, max_abs=25, verbose=False)
+        assert rows.attrs["preprocessing"]["n_masked"] == art.sum()
+        pd.testing.assert_frame_equal(rows, expected)
+    # filled instead when nan is a number
+    rows0, _ = detect_dominant(fc_art, obs, nan=0, max_abs=25, verbose=False)
+    ref0, _ = detect_dominant(fc_art.mask(art, 0.0), obs, verbose=False)
+    pd.testing.assert_frame_equal(rows0, ref0)
+    with pytest.raises(ValueError, match="max_abs"):
+        detect_dominant(fc, obs, max_abs=0, verbose=False)
+    # network: masked values become 0, then the percentile clip is computed
+    lfc, obs2 = small_data
+    lfc_art = lfc.copy()
+    lfc_art.iloc[3, :5] = 35.0
+    cw = ContextWGCNA(lfc_art, obs2, calibrate="none", max_abs=15, clip="p95")
+    ref = lfc_art.mask(lfc_art.abs() > 15, 0.0)
+    assert cw.preprocessing["n_masked"] == 5 and (cw.data.iloc[3, :5] == 0).all()
+    assert np.isclose(cw.preprocessing["clip_bounds"][1], np.percentile(np.abs(ref.to_numpy()), 95))
+    np.testing.assert_array_equal(
+        cw.compute_support().r,
+        ContextWGCNA(ref.clip(*cw.preprocessing["clip_bounds"]), obs2, calibrate="none").compute_support().r)
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

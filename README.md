@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 36 tests, a few seconds
+python -m pytest -q                      # 40 tests, a few seconds
 python scripts/run_ctxwgcna.py --simulate --power 12 --min-module-size 20 --outdir results_demo/
 ```
 
@@ -200,10 +200,14 @@ passing an AnnData object needs nothing extra. On the command line use `--h5ad d
   `nan="skip"` to drop them. Partly-NaN rows can't be skipped in the network (correlations need
   complete rows): drop the affected genes, or fill with `nan=0` only if "not measured" really means
   "no change". `detect_dominant` takes the same option.
-- **Capped LFCs:** if unstable LFCs were capped (e.g. at ±10), many genes sitting at the cap dominate
-  both the correlations and the dominance magnitude (a sum of squares: one gene at 10 counts as much
-  as 100 genes at 1). Use shrunken LFCs, or clip to a lower value: `clip=3`, or a data-driven
-  `clip="p95"` (± the 95th percentile of |LFC|), in both `ContextWGCNA` and `detect_dominant`.
+- **Implausible and capped LFCs:** a GLM returns |LFC| ≈ 20–35 for genes with zero counts in one
+  group. These are not real effects but missing measurements, and they dominate both the correlations
+  and the dominance magnitude (a sum of squares: one gene at 28 counts as much as 784 genes at 1).
+  Look at the histogram of |LFC|: if real values end (e.g. around 10) and a separate cluster sits far
+  above, pass `max_abs` at a value in the gap (e.g. `max_abs=15`) to treat the cluster as missing.
+  Any cutoff inside the gap gives the same result. If unstable LFCs were instead capped (e.g. at
+  ±10), clip to a lower value: `clip=3`, or a data-driven `clip="p95"`. All three options work in
+  both `ContextWGCNA` and `detect_dominant`; shrunken LFCs avoid the problem at the source.
 - **Gene filtering:** memory and time grow with genes² (section 7). About 1,000–5,000 genes is
   comfortable. Filter for genes with meaningful LFC variation (e.g. LFC variance, or differentially
   expressed in at least one context), not for genes correlated with something.
@@ -264,30 +268,37 @@ adata_clean = drop_dominant(adata, rows=rows)
 ```
 or with the script: `--exclude-dominant` (`--detect-dominant` only reports).
 
-**Missing values and extreme LFCs.** Two options prepare the values before scoring. `ContextWGCNA`
-and `global_wgcna` take the same two options (section 4); in `detect_dominant` they affect the
-scoring only, and the data you pass on is not changed.
+**Missing values and extreme LFCs.** Three options prepare the values before scoring, applied in
+this order: `nan`, `max_abs`, `clip`. `ContextWGCNA` and `global_wgcna` take the same options
+(section 4); in `detect_dominant` they affect the scoring only, and the data you pass on is not
+changed.
 
 | Option | Values | Effect |
 |---|---|---|
 | `nan` (`--nan`) | `"raise"` (default) | error on any NaN |
 | | `"skip"` | all-NaN rows (untested combinations) are not scored (metrics NaN, never dominant, not counted in `n_contexts`); other NaN entries are ignored (sum of squares scaled up to all genes, `frac_extreme` over the observed genes) |
 | | a number, e.g. `0` | fill NaN with it (`0` = "no change") |
+| `max_abs` (`--max-abs`) | `None` (default) | no masking |
+| | e.g. `15` | \|LFC\| > 15 (and ±inf) are missing measurements: ignored per entry like NaN, or filled with `nan` if it is a number. They never trigger `nan="raise"`. In `ContextWGCNA` they are set to 0. |
 | `clip` (`--clip`) | `None` (default) | no clipping |
 | | `3` | clip to [−3, 3] |
 | | `(-2, 4)` (CLI: `--clip=-2,4`) | clip to [lo, hi] |
-| | `"p95"` (any `"pNN"`) | clip to ± the 95th percentile of \|LFC\| over all observed values |
+| | `"p95"` (any `"pNN"`) | clip to ± the 95th percentile of \|LFC\| over all observed, unmasked values |
 
 ```python
-rows, summary = detect_dominant(lfc, obs, context_col="celltype", nan="skip", clip="p95")
-rows.attrs["preprocessing"]      # NaN counts, clip bounds used, fraction of values clipped
+rows, summary = detect_dominant(lfc, obs, context_col="celltype", nan="skip", max_abs=15)
+rows.attrs["preprocessing"]      # NaN counts, values masked, clip bounds, fractions affected
 ```
+
+In a real screen (12 cell types × 381 conditions, 3.3% of values at |LFC| 20–35), masking with
+`max_abs=15` raised the rank correlation between `n_dominant` and the conditions' DEG counts from
+0.06 to 0.76. The flagged rows were the same for every cutoff from 8 to 15.
 
 Clipping keeps a few unstable values (e.g. LFCs capped at ±10) from dominating the sum of squares, so
 `fold` reflects how many genes change rather than how many hit the cap. With `nan="skip"`,
 `drop_dominant` keeps the unscored all-NaN rows; `ContextWGCNA(..., nan="skip")` then drops them.
-On the command line `--nan` / `--clip` apply to both steps; `--dominant-nan` / `--dominant-clip`
-override them for the dominance step only. A percentile clip is computed separately in each step,
+On the command line `--nan` / `--max-abs` / `--clip` apply to both steps; `--dominant-nan` /
+`--dominant-max-abs` / `--dominant-clip` override them for the dominance step only. A percentile clip is computed separately in each step,
 so after removing dominant rows the network's `p95` cutoff can be slightly lower.
 
 **Rule.** Each LFC profile (one condition in one system) is compared with the other profiles of the
@@ -364,7 +375,8 @@ python scripts/run_ctxwgcna.py \
     --context-col system --exclude-dominant --outdir results/
 ```
 
-With untested (all-NaN) rows and capped LFCs, add e.g. `--nan skip --clip p95`.
+With untested (all-NaN) rows and implausible GLM LFCs (|LFC| ≈ 30 from zero counts), add e.g.
+`--nan skip --max-abs 15`; with capped LFCs, `--clip p95`.
 
 `python scripts/run_ctxwgcna.py -h` lists all options; they map one-to-one onto the parameters in
 section 4. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
@@ -456,6 +468,7 @@ The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_b
 | `layer` | `None` | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
 | `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
 | `nan` | `"raise"` | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
+| `max_abs` | `None` | Treat \|value\| > `max_abs` (e.g. 15 for GLM LFCs of ~30 from zero counts) as missing; set to 0 (or to `nan` if it is a number), before clipping. |
 | `clip` | `None` | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. `.data` holds the clipped data, `.preprocessing` what was done. |
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
