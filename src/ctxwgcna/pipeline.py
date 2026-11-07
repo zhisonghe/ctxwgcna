@@ -5,7 +5,7 @@ import pandas as pd
 from . import modules as _mod
 from . import network as _net
 from . import submodules as _sub
-from .data import as_frames, make_context_blocks
+from .data import as_frames, make_context_blocks, prepare_frames
 from .similarity import similarity_matrix, standardized_z
 from .support import compute_support, soft_context_weights
 
@@ -38,17 +38,25 @@ class ContextWGCNA:
     :param tom_mode: 'matched' (default), 'shared', or 'standard' (plain WGCNA TOM).
     :param support_min_t: count a context as supporting a pair (in the TOM and the hard module
         profile) only if its t >= this value.
+    :param nan: missing values. 'raise' (default): error. 'skip': drop rows that are entirely NaN
+        (e.g. untested combinations); partly-NaN rows still raise, since correlations here need
+        complete rows. A number, e.g. 0: fill NaN with it.
+    :param clip: limit extreme values before the correlations: None (default), c (clip to [-c, c]),
+        (lo, hi), or 'pNN' (+- the NNth percentile of |FC| over all values, e.g. 'p95').
+        .fc / .obs hold the data after this step; .preprocessing records what was done.
     See README.md section 4 for all parameters.
     """
 
     def __init__(self, fc, obs=None, context_col="system", contexts=None, similarity="pearson", top_n=3,
                  network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
                  tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
-                 store_context_t="auto", store_max_mb=2048, layer=None, genes=None):
+                 store_context_t="auto", store_max_mb=2048, layer=None, genes=None, nan="raise",
+                 clip=None):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
         fc, obs = as_frames(fc, obs, layer=layer, genes=genes)
+        fc, obs, self.preprocessing = prepare_frames(fc, obs, nan=nan, clip=clip)  # NaN rule, clipping
         self.fc, self.obs, self.layer = fc, obs, layer
         self.genes = pd.Index(fc.columns)
         self.context_col = context_col
@@ -200,13 +208,15 @@ class ContextWGCNA:
 
 
 def global_wgcna(fc, similarity="pearson", network_type="signed", power=None, powers=None,
-                 min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None):
+                 min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None,
+                 nan="raise", clip=None):
     """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
 
-    fc is a DataFrame (observations x genes) or AnnData (with optional layer / genes, as in
-    ContextWGCNA). Returns (module labels, power used).
+    fc is a DataFrame (observations x genes) or AnnData (with optional layer / genes / nan / clip, as
+    in ContextWGCNA). Returns (module labels, power used).
     """
     fc, _ = as_frames(fc, None, layer=layer, genes=genes)
+    fc, _, _ = prepare_frames(fc, None, nan=nan, clip=clip, verbose=False)
     r = similarity_matrix(fc.to_numpy(), similarity)
     if power is None:
         sft = _net.scale_free_table(r, _net.DEFAULT_POWERS if powers is None else powers, network_type)

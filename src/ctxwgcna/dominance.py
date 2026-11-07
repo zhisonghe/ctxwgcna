@@ -26,7 +26,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .data import as_frames, check_finite, check_unique, is_anndata
+from .data import as_frames, check_unique, is_anndata, prepare_values
 
 MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
 
@@ -86,67 +86,6 @@ def _magnitude_scores(X):
     mad = MAD_TO_SD * np.median(np.abs(centred))
     mad = mad if mad > 0 else max(np.std(log_fold), 1e-12)
     return ss, fold, centred / mad
-
-
-def _clip_bounds(X, clip):
-    """(lo, hi, description) for `clip`: None, c (-> +-c), (lo, hi), or 'pNN' (+- NNth pct of |X|)."""
-    if clip is None:
-        return None
-    if isinstance(clip, str):
-        if not (clip.startswith("p") and _is_number(clip[1:]) and 0 < float(clip[1:]) <= 100):
-            raise ValueError(f"clip={clip!r}: a string must be a percentile like 'p95' or 'p99.5'")
-        finite = np.abs(X[np.isfinite(X)])
-        c = float(np.percentile(finite, float(clip[1:]))) if finite.size else 0.0
-        if c <= 0:
-            raise ValueError(f"clip={clip!r} gives a cutoff of {c}; use a higher percentile or a value")
-        return -c, c, f"+-{c:.3g} ({clip} of |FC|)"
-    if np.isscalar(clip):
-        if not clip > 0:
-            raise ValueError("clip as a single value must be > 0 (it is used as +-clip)")
-        return -float(clip), float(clip), f"+-{float(clip):.3g}"
-    lo, hi = (float(v) for v in clip)
-    if not lo < hi:
-        raise ValueError("clip=(lo, hi) needs lo < hi")
-    return lo, hi, f"[{lo:.3g}, {hi:.3g}]"
-
-
-def _is_number(text):
-    try:
-        float(text)
-        return True
-    except ValueError:
-        return False
-
-
-def _prepare_values(X, index, nan, clip):
-    """Apply the NaN rule and clipping. Returns (X, scored rows mask, info dict for rows.attrs)."""
-    is_nan = np.isnan(X)
-    all_nan = is_nan.all(axis=1)
-    info = {"nan": nan, "n_nan_rows": int(is_nan.any(axis=1).sum()), "n_all_nan_rows": int(all_nan.sum()),
-            "clip": clip, "clip_bounds": None, "frac_clipped": 0.0}
-    if isinstance(nan, str):
-        if nan == "raise":
-            try:
-                check_finite(np.where(np.isinf(X), 0.0, X), index)  # inf is checked after clipping
-            except ValueError as err:
-                raise ValueError(f"{err} Or pass nan='skip' (ignore them) or nan=0 (fill).") from None
-        elif nan != "skip":
-            raise ValueError("nan must be 'raise', 'skip' or a fill value (e.g. 0)")
-        scored = ~all_nan  # 'skip': all-NaN rows are not scored; other NaNs are ignored per entry
-    else:
-        X = np.where(is_nan, float(nan), X)  # fill
-        scored = np.ones(len(X), dtype=bool)
-    bounds = _clip_bounds(X, clip)
-    if bounds is not None:
-        lo, hi, desc = bounds
-        observed = ~np.isnan(X)
-        info["frac_clipped"] = float(((X < lo) | (X > hi))[observed].mean()) if observed.any() else 0.0
-        info["clip_bounds"] = (lo, hi)
-        info["clip_desc"] = desc
-        X = np.clip(X, lo, hi)
-    if np.isinf(X).any():
-        raise ValueError("fc contains infinite values; pass clip=... or cap them first")
-    return X, scored, info
 
 
 def _score_context(X, min_fold, min_z, min_gene_frac, extreme_z, max_frac):
@@ -233,7 +172,7 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
         obs = obs.loc[fc.index]
     # NaN rule (a NaN left in would make its context's median magnitude NaN and flag nothing there)
     # and optional clipping of extreme values
-    X_all, scored, info = _prepare_values(fc.to_numpy(dtype=np.float64), fc.index, nan, clip)
+    X_all, scored, info = prepare_values(fc.to_numpy(dtype=np.float64), fc.index, nan, clip)
     ctx = obs[context_col].to_numpy()
 
     parts, capped = [], []  # capped: (context, n_candidates, cap) where the cap was hit

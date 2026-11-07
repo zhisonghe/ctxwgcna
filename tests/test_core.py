@@ -403,6 +403,42 @@ def test_dominance_clip_options(dominance_data):
             detect_dominant(fc, obs, clip=bad, verbose=False)
 
 
+@pytest.fixture(scope="module")
+def small_data():
+    fc, obs, _ = simulate_fc(n_genes=320, n_systems=8, n_conditions=30, seed=6)
+    return fc, obs
+
+
+def test_contextwgcna_nan_and_clip(small_data):
+    fc, obs = small_data
+    base = ContextWGCNA(fc, obs, calibrate="none")
+    assert base.fc is fc and base.preprocessing["clip_bounds"] is None  # untouched by default
+    # skip: all-NaN rows dropped, identical to dropping them by hand
+    fc_nan = fc.copy()
+    fc_nan.iloc[[0, 5]] = np.nan
+    with pytest.raises(ValueError, match="NaN"):
+        ContextWGCNA(fc_nan, obs, calibrate="none")
+    skip = ContextWGCNA(fc_nan, obs, calibrate="none", nan="skip")
+    keep = fc_nan.notna().any(axis=1)
+    manual = ContextWGCNA(fc_nan[keep], obs[keep], calibrate="none")
+    assert len(skip.fc) == len(fc) - 2 and skip.fc.index.equals(manual.fc.index)
+    np.testing.assert_array_equal(skip.compute_support().r, manual.compute_support().r)
+    # partly-NaN rows cannot be skipped; filling works
+    fc_part = fc.copy()
+    fc_part.iloc[1, :3] = np.nan
+    with pytest.raises(ValueError, match="partly NaN"):
+        ContextWGCNA(fc_part, obs, calibrate="none", nan="skip")
+    filled = ContextWGCNA(fc_part, obs, calibrate="none", nan=0)
+    assert (filled.fc.iloc[1, :3] == 0).all()
+    # clip: identical to clipping by hand; percentile bounds recorded
+    a = ContextWGCNA(fc, obs, calibrate="none", clip=1.5).compute_support().r
+    b = ContextWGCNA(fc.clip(-1.5, 1.5), obs, calibrate="none").compute_support().r
+    np.testing.assert_array_equal(a, b)
+    p = ContextWGCNA(fc, obs, calibrate="none", clip="p95")
+    assert np.isclose(p.preprocessing["clip_bounds"][1], np.percentile(np.abs(fc.to_numpy()), 95))
+    assert np.abs(p.fc.to_numpy()).max() <= p.preprocessing["clip_bounds"][1]
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

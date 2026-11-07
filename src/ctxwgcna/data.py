@@ -110,6 +110,102 @@ def check_finite(values, index):
         raise ValueError("fc contains infinite values; cap or filter them first")
 
 
+def _clip_bounds(X, clip):
+    """(lo, hi, description) for `clip`: None, c (-> +-c), (lo, hi), or 'pNN' (+- NNth pct of |X|)."""
+    if clip is None:
+        return None
+    if isinstance(clip, str):
+        if not (clip.startswith("p") and _is_number(clip[1:]) and 0 < float(clip[1:]) <= 100):
+            raise ValueError(f"clip={clip!r}: a string must be a percentile like 'p95' or 'p99.5'")
+        finite = np.abs(X[np.isfinite(X)])
+        c = float(np.percentile(finite, float(clip[1:]))) if finite.size else 0.0
+        if c <= 0:
+            raise ValueError(f"clip={clip!r} gives a cutoff of {c}; use a higher percentile or a value")
+        return -c, c, f"+-{c:.3g} ({clip} of |FC|)"
+    if np.isscalar(clip):
+        if not clip > 0:
+            raise ValueError("clip as a single value must be > 0 (it is used as +-clip)")
+        return -float(clip), float(clip), f"+-{float(clip):.3g}"
+    lo, hi = (float(v) for v in clip)
+    if not lo < hi:
+        raise ValueError("clip=(lo, hi) needs lo < hi")
+    return lo, hi, f"[{lo:.3g}, {hi:.3g}]"
+
+
+def _is_number(text):
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def prepare_values(X, index, nan="raise", clip=None):
+    """Apply a NaN rule and optional clipping to an (n_obs, n_genes) array.
+
+    :param nan: 'raise' (error on NaN), 'skip' (all-NaN rows are marked unscored; other NaN entries
+        are left in place for the caller to ignore), or a number to fill NaN with (e.g. 0).
+    :param clip: None; c (clip to [-c, c]); (lo, hi); or 'pNN' (+- the NNth percentile of |X| over
+        all observed values). Infinite values are allowed only when they get clipped.
+    Returns (X, scored: bool mask of rows that hold data, info: dict describing what was done).
+    """
+    is_nan = np.isnan(X)
+    all_nan = is_nan.all(axis=1)
+    info = {"nan": nan, "n_nan_rows": int(is_nan.any(axis=1).sum()), "n_all_nan_rows": int(all_nan.sum()),
+            "clip": clip, "clip_bounds": None, "frac_clipped": 0.0}
+    if isinstance(nan, str):
+        if nan == "raise":
+            try:
+                check_finite(np.where(np.isinf(X), 0.0, X), index)  # inf is checked after clipping
+            except ValueError as err:
+                raise ValueError(f"{err} Or pass nan='skip' (ignore them) or nan=0 (fill).") from None
+        elif nan != "skip":
+            raise ValueError("nan must be 'raise', 'skip' or a fill value (e.g. 0)")
+        scored = ~all_nan  # 'skip': all-NaN rows are not scored; other NaNs are ignored per entry
+    else:
+        X = np.where(is_nan, float(nan), X)  # fill
+        scored = np.ones(len(X), dtype=bool)
+    bounds = _clip_bounds(X, clip)
+    if bounds is not None:
+        lo, hi, desc = bounds
+        observed = ~np.isnan(X)
+        info["frac_clipped"] = float(((X < lo) | (X > hi))[observed].mean()) if observed.any() else 0.0
+        info["clip_bounds"] = (lo, hi)
+        info["clip_desc"] = desc
+        X = np.clip(X, lo, hi)
+    if np.isinf(X).any():
+        raise ValueError("fc contains infinite values; pass clip=... or cap them first")
+    return X, scored, info
+
+
+def prepare_frames(fc, obs, nan="raise", clip=None, verbose=True):
+    """NaN rule + clipping for the network: returns (fc, obs, info) with all-NaN rows dropped.
+
+    Unlike detect_dominant, nan='skip' cannot ignore single NaN entries here: correlations would need
+    pairwise-complete observations (a different n per gene pair). Rows that are only partly NaN
+    therefore raise an error under 'skip'; fill them (nan=0) or drop the affected genes.
+    """
+    X, scored, info = prepare_values(fc.to_numpy(dtype=np.float64), fc.index, nan, clip)
+    if nan == "skip" and np.isnan(X[scored]).any():
+        n_part = info["n_nan_rows"] - info["n_all_nan_rows"]
+        raise ValueError(f"{n_part} rows are partly NaN; nan='skip' only drops rows that are entirely NaN. "
+                         "Fill them (nan=0, if 'not measured' means 'no change') or drop the affected genes.")
+    if info["n_nan_rows"] == 0 and info["clip_bounds"] is None:
+        return fc, obs, info  # nothing changed: keep the caller's frame as is
+    kept = fc.index[scored]
+    out = pd.DataFrame(X[scored], index=kept, columns=fc.columns)
+    if obs is not None:
+        obs = obs[obs.index.isin(kept)]
+    if verbose:
+        if info["n_all_nan_rows"] and nan == "skip":
+            print(f"NaN: dropped {info['n_all_nan_rows']} rows that are entirely NaN.")
+        elif info["n_nan_rows"] and nan not in ("raise", "skip"):
+            print(f"NaN: filled in {info['n_nan_rows']} rows with {nan}.")
+        if info["clip_bounds"] is not None:
+            print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
+    return out, obs, info
+
+
 def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
     """Group the rows of `fc` by `obs[context_col]`.
 

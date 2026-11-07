@@ -183,15 +183,15 @@ passing an AnnData object needs nothing extra. On the command line use `--h5ad d
 ### Recommendations
 - **Values:** log2 FC. Prefer shrunken estimates (e.g. DESeq2 `lfcShrink`, apeglm/ashr) so noisy
   low-count genes don't produce extreme FCs that dominate correlations.
-- **No missing values:** `ContextWGCNA` raises an error on NaN. Rows that are entirely NaN usually
-  mark combinations that were never tested (e.g. a condition with too few cells in one system):
-  drop them (`keep = fc.notna().any(axis=1); fc, obs = fc[keep], obs[keep]`). For partly-NaN rows,
-  drop the affected genes, or fill with 0 only if "not measured" really means "no change".
-  (`detect_dominant` can also skip or fill NaN itself: `nan=`, below.)
+- **Missing values:** NaN raises an error by default. Rows that are entirely NaN usually mark
+  combinations that were never tested (e.g. a condition with too few cells in one system): pass
+  `nan="skip"` to drop them. Partly-NaN rows can't be skipped in the network (correlations need
+  complete rows): drop the affected genes, or fill with `nan=0` only if "not measured" really means
+  "no change". `detect_dominant` takes the same option.
 - **Capped FCs:** if unstable FCs were capped (e.g. at ±10), many genes sitting at the cap dominate
   both the correlations and the dominance magnitude (a sum of squares: one gene at 10 counts as much
-  as 100 genes at 1). Use shrunken FCs, or cap at a lower value (e.g. ±3–5) before the analysis.
-  (`detect_dominant(..., clip=...)` clips for the dominance scoring only.)
+  as 100 genes at 1). Use shrunken FCs, or clip to a lower value: `clip=3`, or a data-driven
+  `clip="p95"` (± the 95th percentile of |FC|), in both `ContextWGCNA` and `detect_dominant`.
 - **Gene filtering:** memory and time grow with genes² (section 7). About 1,000–5,000 genes is
   comfortable. Filter for genes with meaningful FC variation (e.g. FC variance, or differentially
   expressed in at least one context), not for genes correlated with something.
@@ -252,17 +252,18 @@ adata_clean = drop_dominant(adata, rows=rows)
 ```
 or with the script: `--exclude-dominant` (`--detect-dominant` only reports).
 
-**Missing values and extreme FCs.** Two options prepare the values for the scoring only (the data
-you pass on to `ContextWGCNA` is not changed):
+**Missing values and extreme FCs.** Two options prepare the values before scoring. `ContextWGCNA`
+and `global_wgcna` take the same two options (section 4); in `detect_dominant` they affect the
+scoring only, and the data you pass on is not changed.
 
 | Option | Values | Effect |
 |---|---|---|
-| `nan` (`--dominant-nan`) | `"raise"` (default) | error on any NaN |
+| `nan` (`--nan`) | `"raise"` (default) | error on any NaN |
 | | `"skip"` | all-NaN rows (untested combinations) are not scored (metrics NaN, never dominant, not counted in `n_contexts`); other NaN entries are ignored (sum of squares scaled up to all genes, `frac_extreme` over the observed genes) |
 | | a number, e.g. `0` | fill NaN with it (`0` = "no change") |
-| `clip` (`--dominant-clip`) | `None` (default) | no clipping |
+| `clip` (`--clip`) | `None` (default) | no clipping |
 | | `3` | clip to [−3, 3] |
-| | `(-2, 4)` (CLI: `--dominant-clip=-2,4`) | clip to [lo, hi] |
+| | `(-2, 4)` (CLI: `--clip=-2,4`) | clip to [lo, hi] |
 | | `"p95"` (any `"pNN"`) | clip to ± the 95th percentile of \|FC\| over all observed values |
 
 ```python
@@ -272,7 +273,10 @@ rows.attrs["preprocessing"]      # NaN counts, clip bounds used, fraction of val
 
 Clipping keeps a few unstable values (e.g. FCs capped at ±10) from dominating the sum of squares, so
 `fold` reflects how many genes change rather than how many hit the cap. With `nan="skip"`,
-`drop_dominant` keeps the unscored all-NaN rows; drop them before `ContextWGCNA`.
+`drop_dominant` keeps the unscored all-NaN rows; `ContextWGCNA(..., nan="skip")` then drops them.
+On the command line `--nan` / `--clip` apply to both steps; `--dominant-nan` / `--dominant-clip`
+override them for the dominance step only. A percentile clip is computed separately in each step,
+so after removing dominant rows the network's `p95` cutoff can be slightly lower.
 
 **Rule.** Each FC profile (one condition in one system) is compared with the other profiles of the
 **same system**. So a condition can be dominant in some systems only, and only those rows are removed;
@@ -347,6 +351,8 @@ python scripts/run_ctxwgcna.py \
     --h5ad data.h5ad --layer log2fc --var-subset highly_variable \
     --context-col system --exclude-dominant --outdir results/
 ```
+
+With untested (all-NaN) rows and capped FCs, add e.g. `--nan skip --clip p95`.
 
 `python scripts/run_ctxwgcna.py -h` lists all options; they map one-to-one onto the parameters in
 section 4. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
@@ -437,6 +443,8 @@ The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_b
 | `fc` / `obs` | | The data: a DataFrame plus observation table, or an AnnData object (then `obs` defaults to `adata.obs`). |
 | `layer` | `None` | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
 | `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
+| `nan` | `"raise"` | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
+| `clip` | `None` | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|FC\|. `.fc` holds the clipped data, `.preprocessing` what was done. |
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
 | `min_obs` | `10` | Contexts with fewer observations are dropped (must be ≥ 4). Raise it for condition contexts if correlations look noisy. |

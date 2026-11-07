@@ -43,6 +43,11 @@ def parse_args(argv=None):
     io.add_argument("--var-subset", default=None,
                     help="with --h5ad: boolean adata.var column selecting the genes (e.g. highly_variable)")
     io.add_argument("--sep", default=None, help="column separator (default: from file extension)")
+    io.add_argument("--nan", default="raise",
+                    help="missing values: raise (default), skip (drop all-NaN rows), or a fill value such as 0")
+    io.add_argument("--clip", default=None,
+                    help="clip values before the analysis: C (+-C), LO,HI (write --clip=-3,3), or a "
+                         "percentile of |FC| such as p95")
     io.add_argument("--simulate", action="store_true", help="use simulated demo data instead of --fc/--obs")
     io.add_argument("--outdir", required=True)
 
@@ -57,11 +62,10 @@ def parse_args(argv=None):
     d.add_argument("--dominant-min-z", type=float, default=4.0)
     d.add_argument("--dominant-min-gene-frac", type=float, default=0.10)
     d.add_argument("--dominant-max-frac", type=float, default=0.05)
-    d.add_argument("--dominant-nan", default="raise",
-                   help="NaN in the dominance scoring: raise, skip, or a fill value such as 0")
+    d.add_argument("--dominant-nan", default=None,
+                   help="NaN rule for the dominance scoring only (default: same as --nan)")
     d.add_argument("--dominant-clip", default=None,
-                   help="clip FCs for the dominance scoring only: C (+-C), LO,HI (write --dominant-clip=-3,3), "
-                        "or a percentile of |FC| such as p95")
+                   help="clipping for the dominance scoring only (default: same as --clip)")
 
     c = p.add_argument_group("contexts and similarity")
     c.add_argument("--context-col", default="system")
@@ -144,8 +148,9 @@ def dominance_step(args, fc, obs, out):
     rows, summary = detect_dominant(
         fc, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
         min_z=args.dominant_min_z, min_gene_frac=args.dominant_min_gene_frac,
-        max_frac=args.dominant_max_frac, nan=_nan_option(args.dominant_nan),
-        clip=_clip_option(args.dominant_clip))
+        max_frac=args.dominant_max_frac,
+        nan=_nan_option(args.nan if args.dominant_nan is None else args.dominant_nan),
+        clip=_clip_option(args.clip if args.dominant_clip is None else args.dominant_clip))
     rows.to_csv(out("dominance_rows.csv"))
     if summary is not None:
         summary.to_csv(out("dominance_summary.csv"))
@@ -178,7 +183,8 @@ def main(argv=None):
     cw = ContextWGCNA(fc, obs, context_col=args.context_col, contexts=contexts, similarity=args.similarity,
                       top_n=args.top_n, network_type=args.network_type, weighting=args.weighting,
                       calibrate=args.calibrate, n_perm=args.n_perm, tom_mode=args.tom_mode,
-                      min_obs=args.min_obs, seed=args.seed)
+                      min_obs=args.min_obs, seed=args.seed, nan=_nan_option(args.nan),
+                      clip=_clip_option(args.clip))
     print(f"{len(cw.blocks)} contexts: " + ", ".join(f"{b.name}(n={b.n_obs})" for b in cw.blocks))
     sup = cw.compute_support()
     print(f"support: top_n={sup.top_n}, selection={sup.selection}, calibrate={sup.calibrate}, "
@@ -214,7 +220,8 @@ def main(argv=None):
     if args.global_baseline:
         glob, gp = global_wgcna(fc, similarity=args.similarity, network_type=args.network_type,
                                 power=args.power, min_module_size=args.min_module_size,
-                                deep_split=args.deep_split)
+                                deep_split=args.deep_split, nan=_nan_option(args.nan),
+                                clip=_clip_option(args.clip))
         glob.rename("global_module").to_csv(out("global_modules.csv"))
         print(f"global baseline (power {gp}):", glob.value_counts().to_dict())
     if args.save_matrices:
