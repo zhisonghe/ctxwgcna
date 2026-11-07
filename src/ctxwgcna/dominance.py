@@ -17,8 +17,8 @@ of the same system), so dominance can be system-specific. Several dominant rows 
 are expected to be a small minority (max_frac, default 5% of a context's rows): the median/MAD
 reference is only valid then, and widespread "dominance" is a continuum, not a few outliers.
 
-Magnitude is measured as distance from 0, so this assumes FC-like data (0 = no change). For an
-expression matrix, centre each gene within its context first.
+Magnitude is measured as distance from 0, so this assumes log FC (log2 or ln; 0 = no change), not
+linear FC. For an expression matrix, centre each gene within its context first.
 """
 import math
 import warnings
@@ -26,7 +26,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .data import as_frames, check_unique, is_anndata, prepare_values
+from .data import as_frames, check_unique, is_anndata, prepare_values, warn_if_linear_fc
 
 MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
 
@@ -173,6 +173,8 @@ def detect_dominant(fc, obs=None, context_col="system", label_col="condition", m
     # NaN rule (a NaN left in would make its context's median magnitude NaN and flag nothing there)
     # and optional clipping of extreme values
     X_all, scored, info = prepare_values(fc.to_numpy(dtype=np.float64), fc.index, nan, clip)
+    if verbose:
+        warn_if_linear_fc(X_all, "detect_dominant")
     ctx = obs[context_col].to_numpy()
 
     parts, capped = [], []  # capped: (context, n_candidates, cap) where the cap was hit

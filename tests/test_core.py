@@ -439,6 +439,18 @@ def test_contextwgcna_nan_and_clip(small_data):
     assert np.abs(p.fc.to_numpy()).max() <= p.preprocessing["clip_bounds"][1]
 
 
+def test_linear_fc_warning(dominance_data, capsys):
+    fc, obs = dominance_data
+    detect_dominant(fc, obs)
+    assert "linear-scale" not in capsys.readouterr().out
+    detect_dominant(2.0 ** fc, obs)  # linear FC: all positive
+    assert "linear-scale" in capsys.readouterr().out
+    # log base does not matter: log2 -> ln flags the same rows
+    a, _ = detect_dominant(fc, obs, verbose=False)
+    b, _ = detect_dominant(fc * np.log(2), obs, verbose=False)
+    assert a["dominant"].equals(b["dominant"])
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

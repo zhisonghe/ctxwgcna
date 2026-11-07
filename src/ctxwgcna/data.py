@@ -178,6 +178,19 @@ def prepare_values(X, index, nan="raise", clip=None):
     return X, scored, info
 
 
+def warn_if_linear_fc(X, what):
+    """Print a warning if X has no negative values, i.e. looks like linear-scale FC (1 = no change).
+
+    Parts of ctxwgcna that read 0 as "no change" (dominance magnitude, cosine similarity, filling NaN
+    with 0, symmetric clipping) need log FC. Expression matrices are also non-negative, so this is
+    only called where FC input is required.
+    """
+    finite = X[np.isfinite(X)]
+    if finite.size and finite.min() >= 0:
+        print(f"WARNING: no negative values: this looks like linear-scale FC (1 = no change). {what} "
+              "assumes log FC (0 = no change); pass log2(FC) instead.")
+
+
 def prepare_frames(fc, obs, nan="raise", clip=None, verbose=True):
     """NaN rule + clipping for the network: returns (fc, obs, info) with all-NaN rows dropped.
 

@@ -5,7 +5,7 @@ import pandas as pd
 from . import modules as _mod
 from . import network as _net
 from . import submodules as _sub
-from .data import as_frames, make_context_blocks, prepare_frames
+from .data import as_frames, make_context_blocks, prepare_frames, warn_if_linear_fc
 from .similarity import similarity_matrix, standardized_z
 from .support import compute_support, soft_context_weights
 
@@ -57,6 +57,8 @@ class ContextWGCNA:
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
         fc, obs = as_frames(fc, obs, layer=layer, genes=genes)
         fc, obs, self.preprocessing = prepare_frames(fc, obs, nan=nan, clip=clip)  # NaN rule, clipping
+        if similarity == "cosine":  # uncentred: needs 0 = "no change"
+            warn_if_linear_fc(fc.to_numpy(dtype=np.float64), "similarity='cosine'")
         self.fc, self.obs, self.layer = fc, obs, layer
         self.genes = pd.Index(fc.columns)
         self.context_col = context_col

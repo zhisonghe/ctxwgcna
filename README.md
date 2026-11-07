@@ -181,8 +181,19 @@ passing an AnnData object needs nothing extra. On the command line use `--h5ad d
 (optionally `--layer` and `--var-subset`) instead of `--fc`/`--obs`.
 
 ### Recommendations
-- **Values:** log2 FC. Prefer shrunken estimates (e.g. DESeq2 `lfcShrink`, apeglm/ashr) so noisy
+- **Values:** log FC (log2 or ln), not linear FC. Throughout this README "FC" means log FC, where
+  0 = no change. Prefer shrunken estimates (e.g. DESeq2 `lfcShrink`, apeglm/ashr) so noisy
   low-count genes don't produce extreme FCs that dominate correlations.
+
+  | Part | Linear FC (1 = no change, skewed, > 0) | log2 vs ln |
+  |---|---|---|
+  | `pearson` / `spearman` / `bicor` | run, but Pearson is distorted by the skew (an 8-fold rise counts 8×, an 8-fold drop < 1) | identical (scale-invariant) |
+  | `cosine` | wrong: uncentred, so every gene "moves together" away from 0 | identical |
+  | `detect_dominant` | wrong: magnitude is distance from 0, not from 1 | identical (`fold`, `robust_z`, `frac_extreme` are ratios / z-scores) |
+  | `nan=0`, symmetric `clip` | wrong: 0 and ±c only mean "no change" / "equally large up or down" on the log scale | `clip="pNN"` identical; a fixed `clip=c` means log2 c vs ln c (c = 3: 8-fold vs 20-fold) |
+
+  A warning is printed if `detect_dominant` (or `similarity="cosine"`) gets data with no negative
+  values, which suggests linear FC.
 - **Missing values:** NaN raises an error by default. Rows that are entirely NaN usually mark
   combinations that were never tested (e.g. a condition with too few cells in one system): pass
   `nan="skip"` to drop them. Partly-NaN rows can't be skipped in the network (correlations need
