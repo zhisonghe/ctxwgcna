@@ -517,6 +517,17 @@ def test_max_abs_auto(small_data):
     assert cw.preprocessing["max_abs_rule"] == "auto" and np.isclose(cw.preprocessing["max_abs"], cutoff)
     with pytest.raises(ValueError, match="max_abs"):
         detect_dominant(lfc, obs, max_abs="p99", verbose=False)
+    # a genuine strong response (many large values in a few rows) is a mode too, but concentrated:
+    # not masked, so the default 'auto' leaves dominant profiles alone
+    strong = lfc.copy()
+    picks = [np.flatnonzero((obs.system == sysname).to_numpy())[0] for sysname in obs.system.unique()[:3]]
+    strong.iloc[picks, :150] += 15  # one strong row in each of three contexts
+    info = auto_max_abs(strong.to_numpy(), details=True)
+    assert info["cutoff"] is None and info["mode"] > 10 and info["row_frac"] < 0.25
+    rows_auto, _ = detect_dominant(strong, obs, verbose=False)  # default max_abs='auto'
+    rows_off, _ = detect_dominant(strong, obs, max_abs=None, verbose=False)
+    pd.testing.assert_frame_equal(rows_auto, rows_off)
+    assert rows_auto["dominant"].iloc[picks].all()
 
 
 def test_pick_power_all_nan_raises():

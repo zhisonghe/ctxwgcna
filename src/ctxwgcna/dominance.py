@@ -126,7 +126,7 @@ def _summarise_by_label(rows, min_gene_frac):
 
 
 def detect_dominant(lfc, obs=None, context_col="system", label_col="condition", min_fold=5.0, min_z=4.0,
-                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, nan="raise", clip=None, max_abs=None,
+                    min_gene_frac=0.10, extreme_z=5.0, max_frac=0.05, nan="raise", clip=None, max_abs="auto",
                     verbose=True,
                     layer=None, genes=None):
     """Flag dominant LFC profiles.
@@ -150,10 +150,10 @@ def detect_dominant(lfc, obs=None, context_col="system", label_col="condition", 
         NaN (e.g. untested combinations) are not scored (metrics NaN, never dominant); other NaN
         entries are ignored (sum of squares scaled to all genes, frac_extreme over observed genes).
         A number, e.g. 0: fill NaN with it (0 = "no change").
-    :param max_abs: treat |LFC| > max_abs as missing measurements (e.g. 15 for the |LFC| ~ 20-35 a GLM
-        returns when one group has zero counts), or 'auto' to take the cutoff from the gap below such a
-        separate mode of large |LFC| (nothing is masked if there is none; see
-        ctxwgcna.data.auto_max_abs). Masked values are ignored per entry like NaN under
+    :param max_abs: treat |LFC| > max_abs as missing measurements, e.g. the |LFC| ~ 20-35 a GLM
+        returns when one group has zero counts. 'auto' (default): cutoff from the gap below such a
+        separate mode of large |LFC|; nothing is masked if there is none (see
+        ctxwgcna.data.auto_max_abs). A number: fixed cutoff (e.g. 15). None: no masking. Masked values are ignored per entry like NaN under
         'skip' (or filled with nan if it is a number) and never trigger nan='raise'. Applied before
         clipping, so a 'pNN' clip is computed on the unmasked values.
     :param clip: limit extreme FCs before scoring, so that a few unstable values (e.g. capped at

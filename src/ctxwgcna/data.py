@@ -140,7 +140,7 @@ def _is_number(text):
         return False
 
 
-def auto_max_abs(X, bins=100, smooth=5, min_ratio=10.0, min_frac=1e-4):
+def auto_max_abs(X, bins=100, smooth=5, min_ratio=10.0, min_frac=1e-4, min_rows=0.25, details=False):
     """Data-derived max_abs: the antimode between the bulk of |X| and a separate high-|X| mode.
 
     Looks at the histogram of log2|X| above the median |X| (`bins` bins, log counts smoothed over
@@ -148,16 +148,22 @@ def auto_max_abs(X, bins=100, smooth=5, min_ratio=10.0, min_frac=1e-4):
     is at least `min_ratio` times higher than the lowest point between the two (on the smoothed
     counts) and at least `min_frac` of all values lie from that low point upwards. The cutoff is the
     middle (on the log scale) of the longest run of lowest-count bins between the two peaks, i.e. the
-    middle of the gap when it is empty. Returns (cutoff, upper peak) or None when |X| has no second
-    mode (a single, possibly heavy, tail), so nothing should be masked.
+    middle of the gap when it is empty.
 
-    Typical use: GLM LFCs of ~20-35 where one group has zero counts, which form their own mode far
-    above any genuine LFC.
+    The mode must also be scattered: values above the cutoff must occur in at least `min_rows` of the
+    rows (observations) that hold data. GLM artifacts (|LFC| ~ 20-35 where one group has zero counts)
+    are found in almost every row; a genuine strong response is many large values in a few rows,
+    i.e. exactly what dominance detection looks for, and must not be masked.
+
+    Returns (cutoff, upper peak), or None when there is no second mode (a single, possibly heavy,
+    tail) or it is concentrated in few rows, so nothing should be masked. details=True returns a dict
+    instead: cutoff (None if nothing should be masked), mode, row_frac, reason.
     """
+    none = {"cutoff": None, "mode": None, "row_frac": None, "reason": "no separate mode of large |value|"}
     a = np.abs(np.asarray(X, dtype=np.float64))
     a = a[np.isfinite(a) & (a > 0)]
     if a.size < 100:
-        return None
+        return none if details else None
     v = np.log2(a)
     v = v[v >= np.log2(np.median(a))]
     h, edges = np.histogram(v, bins=bins)
@@ -169,7 +175,7 @@ def auto_max_abs(X, bins=100, smooth=5, min_ratio=10.0, min_frac=1e-4):
                 and (best is None or ls[p2] > ls[best])):
             best = p2
     if best is None:
-        return None
+        return none if details else None
     seg = h[p1:best + 1]
     is_min = np.append(seg == seg.min(), False)
     runs, start = [], None  # (length, first, end) of runs of lowest-count bins
@@ -180,8 +186,20 @@ def auto_max_abs(X, bins=100, smooth=5, min_ratio=10.0, min_frac=1e-4):
             runs.append((i - start, start, i))
             start = None
     _, first, end = max(runs)
-    cutoff = 2 ** ((edges[p1 + first] + edges[p1 + end]) / 2)
-    return float(cutoff), float(2 ** ((edges[best] + edges[best + 1]) / 2))
+    cutoff = float(2 ** ((edges[p1 + first] + edges[p1 + end]) / 2))
+    mode = float(2 ** ((edges[best] + edges[best + 1]) / 2))
+    X = np.asarray(X, dtype=np.float64).reshape(len(X), -1)
+    with np.errstate(invalid="ignore"):
+        above = (np.abs(X) > cutoff).any(axis=1)
+    has_data = ~np.isnan(X).all(axis=1)
+    row_frac = float(above[has_data].mean())
+    if row_frac < min_rows:
+        out = {"cutoff": None, "mode": mode, "row_frac": row_frac,
+               "reason": f"a mode of large |value| at ~{mode:.3g} is confined to {100 * row_frac:.1f}% of rows "
+                         "(a concentrated response, not scattered artifacts)"}
+        return out if details else None
+    out = {"cutoff": cutoff, "mode": mode, "row_frac": row_frac, "reason": None}
+    return out if details else (cutoff, mode)
 
 
 def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="nan"):
@@ -202,7 +220,7 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
     is_nan = np.isnan(X)
     all_nan = is_nan.all(axis=1)
     info = {"nan": nan, "n_nan_rows": int(is_nan.any(axis=1).sum()), "n_all_nan_rows": int(all_nan.sum()),
-            "max_abs": max_abs, "max_abs_rule": None, "n_masked": 0, "frac_masked": 0.0,
+            "max_abs": max_abs, "max_abs_rule": None, "max_abs_mode": None, "n_masked": 0, "frac_masked": 0.0,
             "clip": clip, "clip_bounds": None, "frac_clipped": 0.0}
     if isinstance(nan, str):
         if nan == "raise":
@@ -219,10 +237,11 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
     if isinstance(max_abs, str):
         if max_abs != "auto":
             raise ValueError("max_abs must be a number or 'auto'")
-        found = auto_max_abs(X)
-        max_abs = None if found is None else found[0]
+        found = auto_max_abs(X, details=True)
+        max_abs = found["cutoff"]
         info["max_abs"], info["max_abs_rule"] = max_abs, "auto"
-        info["max_abs_mode"] = None if found is None else found[1]
+        info["max_abs_mode"], info["max_abs_row_frac"] = found["mode"], found["row_frac"]
+        info["max_abs_reason"] = found["reason"]
     if max_abs is not None:
         if not max_abs > 0:
             raise ValueError("max_abs must be > 0")
@@ -253,11 +272,12 @@ def report_preparation(info, nan_message):
         print(f"NaN: {info['n_nan_rows']} rows contain NaN ({info['n_all_nan_rows']} entirely); {nan_message}.")
     auto = info.get("max_abs_rule") == "auto"
     if info["max_abs"] is not None:
-        how = f" (max_abs='auto': gap below a mode at |value| ~ {info['max_abs_mode']:.3g})" if auto else ""
+        how = (f" (max_abs='auto': gap below a mode at |value| ~ {info['max_abs_mode']:.3g}, in "
+               f"{100 * info['max_abs_row_frac']:.0f}% of rows)" if auto else "")
         print(f"Masked |value| > {info['max_abs']:.3g}{how}: {info['n_masked']} values "
               f"({100 * info['frac_masked']:.2f}%), treated as missing.")
-    elif auto:
-        print("max_abs='auto': no separate mode of large |value| found; nothing masked.")
+    elif auto and info["max_abs_mode"] is not None:  # a mode was found but not masked: say why
+        print(f"max_abs='auto': {info['max_abs_reason']}; nothing masked.")
     if info["clip_bounds"] is not None:
         print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
 
@@ -291,7 +311,7 @@ def prepare_frames(data, obs, nan="raise", clip=None, max_abs=None, verbose=True
         raise ValueError(f"{n_part} rows are partly NaN; nan='skip' only drops rows that are entirely NaN. "
                          "Fill them (nan=0, if 'not measured' means 'no change') or drop the affected genes.")
     if info["n_nan_rows"] == 0 and info["n_masked"] == 0 and info["clip_bounds"] is None:
-        if verbose and info["max_abs_rule"] == "auto":
+        if verbose and info["max_abs_mode"] is not None:
             report_preparation(info, "")
         return data, obs, info  # nothing changed: keep the caller's frame as is
     kept = data.index[scored]

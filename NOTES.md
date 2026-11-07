@@ -161,3 +161,12 @@ arbitrary with heavy genuine tails). Real data: 15.0-15.6 for 60/100/200 bins an
 same 7 flags as max_abs=15. No second mode (-> nothing masked) on the real data with artifacts
 removed, simulations, t(df 1-3) and Laplace noise. Injected artifacts at |LFC| ~ 28 into simulated
 data: found at >= 0.05% of values (cutoff 10-11, inside the empty gap), missed at 0.01%.
+
+## max_abs='auto' is the default (2026-11-08)
+Spread criterion added: values above the cutoff must occur in >= 25% of rows with data, else nothing
+is masked (reason in preprocessing["max_abs_reason"]). Without it, auto masked genuine dominant
+profiles (one row +15 on 120 genes forms a second mode too) and broke the dominance tests. Real
+data: artifacts in 96-100% of rows, the top row holds 0.27% of them; auto -> 15.5, same 7 flags.
+Trade-off: injected artifacts at 0.05% of values in a 500-gene simulation hit only 24% of rows and
+are now left in (caught from 0.1%). Silent when there is no second mode; prints when it masks or when
+it finds a concentrated mode and leaves it. CLI: --max-abs auto (default) / NUMBER / none.

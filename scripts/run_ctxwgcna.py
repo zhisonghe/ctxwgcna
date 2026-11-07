@@ -46,10 +46,10 @@ def parse_args(argv=None):
     io.add_argument("--sep", default=None, help="column separator (default: from file extension)")
     io.add_argument("--nan", default="raise",
                     help="missing values: raise (default), skip (drop all-NaN rows), or a fill value such as 0")
-    io.add_argument("--max-abs", type=_max_abs_option, default=None,
-                    help="treat |value| > MAX_ABS as missing (e.g. 15 for GLM LFCs of ~30 from zero counts); "
-                         "'auto' finds the cutoff from the data; set to 0 in the network, ignored in the "
-                         "dominance scoring")
+    io.add_argument("--max-abs", type=_max_abs_option, default="auto",
+                    help="treat |value| > MAX_ABS as missing (GLM LFCs of ~30 from zero counts): auto (default, "
+                         "cutoff from the data; nothing masked without a separate mode of large values), a "
+                         "number such as 15, or none; set to 0 in the network, ignored in the dominance scoring")
     io.add_argument("--clip", default=None,
                     help="clip values before the analysis: C (+-C), LO,HI (write --clip=-3,3), or a "
                          "percentile of |value| such as p95")
@@ -139,8 +139,17 @@ def _nan_option(text):
 
 
 def _max_abs_option(text):
-    """'auto' stays a string; anything else is a cutoff."""
+    """'auto' stays a string, 'none' disables masking (_NO_MASK), anything else is a cutoff."""
+    if text.lower() == "none":
+        return _NO_MASK
     return text if text == "auto" else float(text)
+
+
+_NO_MASK = "none"  # CLI value for max_abs=None (None itself means "same as --max-abs" for the override)
+
+
+def _max_abs_value(value):
+    return None if value == _NO_MASK else value
 
 
 def _clip_option(text):
@@ -163,7 +172,7 @@ def dominance_step(args, data, obs, out):
         max_frac=args.dominant_max_frac,
         nan=_nan_option(args.nan if args.dominant_nan is None else args.dominant_nan),
         clip=_clip_option(args.clip if args.dominant_clip is None else args.dominant_clip),
-        max_abs=args.max_abs if args.dominant_max_abs is None else args.dominant_max_abs)
+        max_abs=_max_abs_value(args.max_abs if args.dominant_max_abs is None else args.dominant_max_abs))
     rows.to_csv(out("dominance_rows.csv"))
     if summary is not None:
         summary.to_csv(out("dominance_summary.csv"))
@@ -197,7 +206,7 @@ def main(argv=None):
                       top_n=args.top_n, network_type=args.network_type, weighting=args.weighting,
                       calibrate=args.calibrate, n_perm=args.n_perm, tom_mode=args.tom_mode,
                       min_obs=args.min_obs, seed=args.seed, nan=_nan_option(args.nan),
-                      clip=_clip_option(args.clip), max_abs=args.max_abs)
+                      clip=_clip_option(args.clip), max_abs=_max_abs_value(args.max_abs))
     print(f"{len(cw.blocks)} contexts: " + ", ".join(f"{b.name}(n={b.n_obs})" for b in cw.blocks))
     sup = cw.compute_support()
     print(f"support: top_n={sup.top_n}, selection={sup.selection}, calibrate={sup.calibrate}, "
@@ -234,7 +243,7 @@ def main(argv=None):
         glob, gp = global_wgcna(data, similarity=args.similarity, network_type=args.network_type,
                                 power=args.power, min_module_size=args.min_module_size,
                                 deep_split=args.deep_split, nan=_nan_option(args.nan),
-                                clip=_clip_option(args.clip), max_abs=args.max_abs)
+                                clip=_clip_option(args.clip), max_abs=_max_abs_value(args.max_abs))
         glob.rename("global_module").to_csv(out("global_modules.csv"))
         print(f"global baseline (power {gp}):", glob.value_counts().to_dict())
     if args.save_matrices:

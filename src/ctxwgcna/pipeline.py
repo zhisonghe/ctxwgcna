@@ -43,9 +43,10 @@ class ContextWGCNA:
         complete rows. A number, e.g. 0: fill NaN with it.
     :param clip: limit extreme values before the correlations: None (default), c (clip to [-c, c]),
         (lo, hi), or 'pNN' (+- the NNth percentile of |value| over all values, e.g. 'p95').
-    :param max_abs: treat |value| > max_abs as missing measurements (e.g. 15 for the |LFC| ~ 20-35 a
-        GLM returns when one group has zero counts), or 'auto' (cutoff from the data, see
-        detect_dominant); they are set to 0 (or to nan if it is a number),
+    :param max_abs: treat |value| > max_abs as missing measurements (the |LFC| ~ 20-35 a GLM returns
+        when one group has zero counts): 'auto' (default; cutoff from the data, nothing masked if
+        there is no separate mode of large values, see detect_dominant), a number (e.g. 15), or None
+        (no masking); they are set to 0 (or to nan if it is a number),
         before clipping. .data / .obs hold the data after these steps; .preprocessing records them.
     See README.md section 4 for all parameters.
     """
@@ -54,7 +55,7 @@ class ContextWGCNA:
                  network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
                  tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
                  store_context_t="auto", store_max_mb=2048, layer=None, genes=None, nan="raise",
-                 clip=None, max_abs=None):
+                 clip=None, max_abs="auto"):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
@@ -214,7 +215,7 @@ class ContextWGCNA:
 
 def global_wgcna(data, similarity="pearson", network_type="signed", power=None, powers=None,
                  min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None,
-                 nan="raise", clip=None, max_abs=None):
+                 nan="raise", clip=None, max_abs="auto"):
     """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
 
     data is a DataFrame (observations x genes) or AnnData; layer, genes, nan, clip and max_abs work as
