@@ -46,9 +46,10 @@ def parse_args(argv=None):
     io.add_argument("--sep", default=None, help="column separator (default: from file extension)")
     io.add_argument("--nan", default="raise",
                     help="missing values: raise (default), skip (drop all-NaN rows), or a fill value such as 0")
-    io.add_argument("--max-abs", type=float, default=None,
+    io.add_argument("--max-abs", type=_max_abs_option, default=None,
                     help="treat |value| > MAX_ABS as missing (e.g. 15 for GLM LFCs of ~30 from zero counts); "
-                         "set to 0 in the network, ignored in the dominance scoring")
+                         "'auto' finds the cutoff from the data; set to 0 in the network, ignored in the "
+                         "dominance scoring")
     io.add_argument("--clip", default=None,
                     help="clip values before the analysis: C (+-C), LO,HI (write --clip=-3,3), or a "
                          "percentile of |value| such as p95")
@@ -68,7 +69,7 @@ def parse_args(argv=None):
     d.add_argument("--dominant-max-frac", type=float, default=0.05)
     d.add_argument("--dominant-nan", default=None,
                    help="NaN rule for the dominance scoring only (default: same as --nan)")
-    d.add_argument("--dominant-max-abs", type=float, default=None,
+    d.add_argument("--dominant-max-abs", type=_max_abs_option, default=None,
                    help="masking for the dominance scoring only (default: same as --max-abs)")
     d.add_argument("--dominant-clip", default=None,
                    help="clipping for the dominance scoring only (default: same as --clip)")
@@ -135,6 +136,11 @@ def load_data(args):
 def _nan_option(text):
     """'raise' / 'skip' stay strings; anything else is a fill value."""
     return text if text in ("raise", "skip") else float(text)
+
+
+def _max_abs_option(text):
+    """'auto' stays a string; anything else is a cutoff."""
+    return text if text == "auto" else float(text)
 
 
 def _clip_option(text):

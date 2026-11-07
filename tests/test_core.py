@@ -494,6 +494,31 @@ def test_max_abs_masking(dominance_data, small_data):
         ContextWGCNA(ref.clip(*cw.preprocessing["clip_bounds"]), obs2, calibrate="none").compute_support().r)
 
 
+def test_max_abs_auto(small_data):
+    from ctxwgcna.data import auto_max_abs
+    lfc, obs = small_data
+    rng = np.random.default_rng(1)
+    genuine = np.abs(lfc.to_numpy()).max()
+    # no separate mode: nothing masked (also for heavy-tailed noise)
+    assert auto_max_abs(lfc.to_numpy()) is None
+    assert auto_max_abs(rng.standard_t(2, size=(1000, 300))) is None
+    rows, _ = detect_dominant(lfc, obs, max_abs="auto", verbose=False)
+    assert rows.attrs["preprocessing"]["n_masked"] == 0
+    # GLM-style artifacts at |LFC| ~ 28: cutoff in the gap, same result as the manual mask
+    art = rng.random(lfc.shape) < 0.01
+    lfc_art = lfc.mask(art, rng.normal(28, 3, lfc.shape) * np.sign(rng.standard_normal(lfc.shape)))
+    cutoff, mode = auto_max_abs(lfc_art.to_numpy())
+    assert genuine < cutoff < np.abs(lfc_art.to_numpy()[art]).min() and 20 < mode < 35
+    rows, _ = detect_dominant(lfc_art, obs, max_abs="auto", verbose=False)
+    ref, _ = detect_dominant(lfc_art, obs, max_abs=cutoff, verbose=False)
+    pd.testing.assert_frame_equal(rows, ref)
+    assert rows.attrs["preprocessing"]["n_masked"] == art.sum()
+    cw = ContextWGCNA(lfc_art, obs, calibrate="none", max_abs="auto")
+    assert cw.preprocessing["max_abs_rule"] == "auto" and np.isclose(cw.preprocessing["max_abs"], cutoff)
+    with pytest.raises(ValueError, match="max_abs"):
+        detect_dominant(lfc, obs, max_abs="p99", verbose=False)
+
+
 def test_pick_power_all_nan_raises():
     from ctxwgcna.network import pick_power
     t = pd.DataFrame({"power": [1, 2], "signed R.sq": [np.nan, np.nan], "mean(k)": [1.0, 1.0]})

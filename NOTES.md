@@ -150,3 +150,14 @@ at 20. Clipping (+-10, +-3) helped much less. Added max_abs to detect_dominant /
 global_wgcna (masked -> ignored per entry in dominance, 0 in the network). DEG counts from a pooled
 test are not expected to match dominance fully: a condition with consistent moderate changes in all
 cell types gets many DEGs but no outsized row in any cell type.
+
+## max_abs='auto' (2026-11-08)
+Data-derived cutoff: antimode of the log2|x| histogram (above median |x|, 100 bins, log counts
+smoothed over 5) between the bulk peak and a second mode that is >= 10x the valley and holds >= 1e-4
+of the values; cutoff = middle of the longest run of lowest-count bins. Rejected: percentiles (on
+the real data p96.5 = 3.5, p97 = 25; needs the artifact fraction), largest gap between sorted values
+(lands in the extreme tail at ~37 because the 10-20 valley is sparse, not empty), median + k*MAD (k
+arbitrary with heavy genuine tails). Real data: 15.0-15.6 for 60/100/200 bins and smoothing 3-9,
+same 7 flags as max_abs=15. No second mode (-> nothing masked) on the real data with artifacts
+removed, simulations, t(df 1-3) and Laplace noise. Injected artifacts at |LFC| ~ 28 into simulated
+data: found at >= 0.05% of values (cutoff 10-11, inside the empty gap), missed at 0.01%.

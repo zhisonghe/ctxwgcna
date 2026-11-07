@@ -140,6 +140,50 @@ def _is_number(text):
         return False
 
 
+def auto_max_abs(X, bins=100, smooth=5, min_ratio=10.0, min_frac=1e-4):
+    """Data-derived max_abs: the antimode between the bulk of |X| and a separate high-|X| mode.
+
+    Looks at the histogram of log2|X| above the median |X| (`bins` bins, log counts smoothed over
+    `smooth` bins). The bulk peak is the highest bin. A second mode counts as separate when its peak
+    is at least `min_ratio` times higher than the lowest point between the two (on the smoothed
+    counts) and at least `min_frac` of all values lie from that low point upwards. The cutoff is the
+    middle (on the log scale) of the longest run of lowest-count bins between the two peaks, i.e. the
+    middle of the gap when it is empty. Returns (cutoff, upper peak) or None when |X| has no second
+    mode (a single, possibly heavy, tail), so nothing should be masked.
+
+    Typical use: GLM LFCs of ~20-35 where one group has zero counts, which form their own mode far
+    above any genuine LFC.
+    """
+    a = np.abs(np.asarray(X, dtype=np.float64))
+    a = a[np.isfinite(a) & (a > 0)]
+    if a.size < 100:
+        return None
+    v = np.log2(a)
+    v = v[v >= np.log2(np.median(a))]
+    h, edges = np.histogram(v, bins=bins)
+    ls = np.convolve(np.log1p(h), np.ones(smooth) / smooth, mode="same")
+    p1, best = int(np.argmax(ls)), None
+    for p2 in range(p1 + 2, bins):
+        low = p1 + int(np.argmin(ls[p1:p2]))
+        if (ls[p2] - ls[low] >= np.log(min_ratio) and h[low:].sum() >= min_frac * a.size
+                and (best is None or ls[p2] > ls[best])):
+            best = p2
+    if best is None:
+        return None
+    seg = h[p1:best + 1]
+    is_min = np.append(seg == seg.min(), False)
+    runs, start = [], None  # (length, first, end) of runs of lowest-count bins
+    for i, flag in enumerate(is_min):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            runs.append((i - start, start, i))
+            start = None
+    _, first, end = max(runs)
+    cutoff = 2 ** ((edges[p1 + first] + edges[p1 + end]) / 2)
+    return float(cutoff), float(2 ** ((edges[best] + edges[best + 1]) / 2))
+
+
 def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="nan"):
     """Apply a NaN rule, optional masking of implausible values, and optional clipping to an
     (n_obs, n_genes) array, in that order.
@@ -148,7 +192,8 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
         are left in place for the caller to ignore), or a number to fill NaN with (e.g. 0).
     :param max_abs: values with |x| > max_abs (including +-inf) are treated as missing measurements,
         e.g. the |LFC| ~ 30 a GLM returns when one group has zero counts. They never trigger
-        nan='raise'; they become `masked_as`.
+        nan='raise'; they become `masked_as`. 'auto' derives the cutoff from the data (auto_max_abs:
+        the gap below a separate high-|x| mode) and masks nothing when there is no such mode.
     :param masked_as: 'nan' (left missing, for callers that ignore single entries) or a number.
     :param clip: None; c (clip to [-c, c]); (lo, hi); or 'pNN' (+- the NNth percentile of |X| over
         all observed, unmasked values). Infinite values are allowed only when masked or clipped.
@@ -157,7 +202,7 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
     is_nan = np.isnan(X)
     all_nan = is_nan.all(axis=1)
     info = {"nan": nan, "n_nan_rows": int(is_nan.any(axis=1).sum()), "n_all_nan_rows": int(all_nan.sum()),
-            "max_abs": max_abs, "n_masked": 0, "frac_masked": 0.0,
+            "max_abs": max_abs, "max_abs_rule": None, "n_masked": 0, "frac_masked": 0.0,
             "clip": clip, "clip_bounds": None, "frac_clipped": 0.0}
     if isinstance(nan, str):
         if nan == "raise":
@@ -171,6 +216,13 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
     else:
         X = np.where(is_nan, float(nan), X)  # fill
         scored = np.ones(len(X), dtype=bool)
+    if isinstance(max_abs, str):
+        if max_abs != "auto":
+            raise ValueError("max_abs must be a number or 'auto'")
+        found = auto_max_abs(X)
+        max_abs = None if found is None else found[0]
+        info["max_abs"], info["max_abs_rule"] = max_abs, "auto"
+        info["max_abs_mode"] = None if found is None else found[1]
     if max_abs is not None:
         if not max_abs > 0:
             raise ValueError("max_abs must be > 0")
@@ -199,9 +251,13 @@ def report_preparation(info, nan_message):
     """Print what prepare_values did (NaN rule, masking, clipping); nan_message describes the NaN rule."""
     if info["n_nan_rows"] and nan_message:
         print(f"NaN: {info['n_nan_rows']} rows contain NaN ({info['n_all_nan_rows']} entirely); {nan_message}.")
+    auto = info.get("max_abs_rule") == "auto"
     if info["max_abs"] is not None:
-        print(f"Masked |value| > {info['max_abs']:g}: {info['n_masked']} values "
+        how = f" (max_abs='auto': gap below a mode at |value| ~ {info['max_abs_mode']:.3g})" if auto else ""
+        print(f"Masked |value| > {info['max_abs']:.3g}{how}: {info['n_masked']} values "
               f"({100 * info['frac_masked']:.2f}%), treated as missing.")
+    elif auto:
+        print("max_abs='auto': no separate mode of large |value| found; nothing masked.")
     if info["clip_bounds"] is not None:
         print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
 
@@ -235,6 +291,8 @@ def prepare_frames(data, obs, nan="raise", clip=None, max_abs=None, verbose=True
         raise ValueError(f"{n_part} rows are partly NaN; nan='skip' only drops rows that are entirely NaN. "
                          "Fill them (nan=0, if 'not measured' means 'no change') or drop the affected genes.")
     if info["n_nan_rows"] == 0 and info["n_masked"] == 0 and info["clip_bounds"] is None:
+        if verbose and info["max_abs_rule"] == "auto":
+            report_preparation(info, "")
         return data, obs, info  # nothing changed: keep the caller's frame as is
     kept = data.index[scored]
     out = pd.DataFrame(X[scored], index=kept, columns=data.columns)

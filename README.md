@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 40 tests, a few seconds
+python -m pytest -q                      # 41 tests, a few seconds
 python scripts/run_ctxwgcna.py --simulate --power 12 --min-module-size 20 --outdir results_demo/
 ```
 
@@ -205,7 +205,8 @@ passing an AnnData object needs nothing extra. On the command line use `--h5ad d
   and the dominance magnitude (a sum of squares: one gene at 28 counts as much as 784 genes at 1).
   Look at the histogram of |LFC|: if real values end (e.g. around 10) and a separate cluster sits far
   above, pass `max_abs` at a value in the gap (e.g. `max_abs=15`) to treat the cluster as missing.
-  Any cutoff inside the gap gives the same result. If unstable LFCs were instead capped (e.g. at
+  Any cutoff inside the gap gives the same result. `max_abs="auto"` finds the gap itself (below);
+  it masks nothing when |LFC| has no such second cluster. If unstable LFCs were instead capped (e.g. at
   ±10), clip to a lower value: `clip=3`, or a data-driven `clip="p95"`. All three options work in
   both `ContextWGCNA` and `detect_dominant`; shrunken LFCs avoid the problem at the source.
 - **Gene filtering:** memory and time grow with genes² (section 7). About 1,000–5,000 genes is
@@ -280,6 +281,7 @@ changed.
 | | a number, e.g. `0` | fill NaN with it (`0` = "no change") |
 | `max_abs` (`--max-abs`) | `None` (default) | no masking |
 | | e.g. `15` | \|LFC\| > 15 (and ±inf) are missing measurements: ignored per entry like NaN, or filled with `nan` if it is a number. They never trigger `nan="raise"`. In `ContextWGCNA` they are set to 0. |
+| | `"auto"` | cutoff from the data: the gap below a separate cluster of large \|LFC\| (see below); nothing masked if there is none |
 | `clip` (`--clip`) | `None` (default) | no clipping |
 | | `3` | clip to [−3, 3] |
 | | `(-2, 4)` (CLI: `--clip=-2,4`) | clip to [lo, hi] |
@@ -293,6 +295,15 @@ rows.attrs["preprocessing"]      # NaN counts, values masked, clip bounds, fract
 In a real screen (12 cell types × 381 conditions, 3.3% of values at |LFC| 20–35), masking with
 `max_abs=15` raised the rank correlation between `n_dominant` and the conditions' DEG counts from
 0.06 to 0.76. The flagged rows were the same for every cutoff from 8 to 15.
+
+`max_abs="auto"` reads the cutoff off the histogram of log2|LFC| (above the median |LFC|). It looks
+for a second mode: a peak at least 10× higher than the lowest point between it and the bulk, holding
+at least 0.01% of the values. The cutoff is the middle of the lowest stretch between the two, i.e.
+of the gap when it is empty. A single tail, however heavy, has no second mode, so nothing is masked.
+In the screen above it chose 15.5 (artifact mode at ~27) and flagged the same rows as `max_abs=15`.
+A percentile is not a substitute: the 96.5th percentile of |LFC| there was 3.5 and the 97th was 25,
+so it only works if the artifact fraction is known in advance. Check the printed cutoff;
+`ctxwgcna.data.auto_max_abs(values)` returns (cutoff, mode) without running anything else.
 
 Clipping keeps a few unstable values (e.g. LFCs capped at ±10) from dominating the sum of squares, so
 `fold` reflects how many genes change rather than how many hit the cap. With `nan="skip"`,
@@ -376,7 +387,7 @@ python scripts/run_ctxwgcna.py \
 ```
 
 With untested (all-NaN) rows and implausible GLM LFCs (|LFC| ≈ 30 from zero counts), add e.g.
-`--nan skip --max-abs 15`; with capped LFCs, `--clip p95`.
+`--nan skip --max-abs 15` (or `--max-abs auto`); with capped LFCs, `--clip p95`.
 
 `python scripts/run_ctxwgcna.py -h` lists all options; they map one-to-one onto the parameters in
 section 4. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
@@ -468,7 +479,7 @@ The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_b
 | `layer` | `None` | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
 | `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
 | `nan` | `"raise"` | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
-| `max_abs` | `None` | Treat \|value\| > `max_abs` (e.g. 15 for GLM LFCs of ~30 from zero counts) as missing; set to 0 (or to `nan` if it is a number), before clipping. |
+| `max_abs` | `None` | Treat \|value\| > `max_abs` (e.g. 15 for GLM LFCs of ~30 from zero counts, or `"auto"`) as missing; set to 0 (or to `nan` if it is a number), before clipping. |
 | `clip` | `None` | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. `.data` holds the clipped data, `.preprocessing` what was done. |
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |

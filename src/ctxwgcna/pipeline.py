@@ -44,7 +44,8 @@ class ContextWGCNA:
     :param clip: limit extreme values before the correlations: None (default), c (clip to [-c, c]),
         (lo, hi), or 'pNN' (+- the NNth percentile of |value| over all values, e.g. 'p95').
     :param max_abs: treat |value| > max_abs as missing measurements (e.g. 15 for the |LFC| ~ 20-35 a
-        GLM returns when one group has zero counts); they are set to 0 (or to nan if it is a number),
+        GLM returns when one group has zero counts), or 'auto' (cutoff from the data, see
+        detect_dominant); they are set to 0 (or to nan if it is a number),
         before clipping. .data / .obs hold the data after these steps; .preprocessing records them.
     See README.md section 4 for all parameters.
     """
