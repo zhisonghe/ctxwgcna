@@ -7,7 +7,7 @@ from sklearn.metrics import adjusted_rand_score
 from ctxwgcna import ContextWGCNA, adjacency_from_r, global_wgcna, compute_support, context_tom, make_context_blocks
 from ctxwgcna.network import scale_free_fit_index
 from ctxwgcna.similarity import fisher_z, similarity_matrix
-from ctxwgcna.simulate import simulate_fc
+from ctxwgcna.simulate import simulate_lfc
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ def _majority(ct, t):
 
 
 def test_simulation_recovers_local_modules_where_global_fails():
-    fc, obs, truth = simulate_fc(seed=0)
+    fc, obs, truth = simulate_lfc(seed=0)
     glob, _ = global_wgcna(fc, power=12, min_module_size=20)
     cw = ContextWGCNA(fc, obs, context_col="system", top_n=2, tom_mode="matched")
     mods = cw.run(power=12, min_module_size=20)
@@ -158,7 +158,7 @@ def test_simulation_recovers_local_modules_where_global_fails():
 
 def test_context_tom_removes_cross_context_overlap():
     """P-Q linked in sys6 and Q-R in sys7: shared neighbours Q must not raise TOM(P, R)."""
-    fc, obs, truth = simulate_fc(seed=0)
+    fc, obs, truth = simulate_lfc(seed=0)
     T = truth.to_numpy()
 
     def block_mean(M, a, b):
@@ -197,7 +197,7 @@ def test_split_module_pure_noise_gives_nothing():
 
 
 def test_split_recovers_overlap_and_keeps_coherent_modules_whole():
-    fc, obs, truth = simulate_fc(seed=0)
+    fc, obs, truth = simulate_lfc(seed=0)
     cw = ContextWGCNA(fc, obs, top_n=2)
     cw.run(power=12, min_module_size=20)
     subs, mem = cw.split_modules()
@@ -219,7 +219,7 @@ def test_split_recovers_overlap_and_keeps_coherent_modules_whole():
 
 
 def test_stored_and_recomputed_context_statistics_agree():
-    fc, obs, _ = simulate_fc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
+    fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
     a = ContextWGCNA(fc, obs, top_n=2)
     a.compute_support()
     b = ContextWGCNA(fc, obs, top_n=2)
@@ -250,7 +250,7 @@ def _add_response(fc, obs, cond, frac, effect, systems=None, seed=0):
 
 @pytest.fixture(scope="module")
 def dominance_data():
-    fc, obs, _ = simulate_fc(seed=4)  # 500 genes, 10 systems x 100 conditions
+    fc, obs, _ = simulate_lfc(seed=4)  # 500 genes, 10 systems x 100 conditions
     fc = _add_response(fc, obs, "c000", 0.6, (10, 20), seed=1)                      # strong, everywhere
     fc = _add_response(fc, obs, "c001", 0.3, (4, 8), seed=2)                        # weaker, everywhere
     fc = _add_response(fc, obs, "c002", 0.5, (6, 12), systems=["sys0", "sys1"], seed=3)  # 2 systems only
@@ -277,13 +277,13 @@ def test_detects_multiple_and_system_specific_dominant_profiles(dominance_data):
 
 
 def test_no_dominance_flags_nothing():
-    fc, obs, _ = simulate_fc(seed=5)
+    fc, obs, _ = simulate_lfc(seed=5)
     rows, _ = detect_dominant(fc, obs, verbose=False)
     assert not rows["dominant"].any()
 
 
 def test_cap_limits_flagged_fraction_and_warns(capsys):
-    fc, obs, _ = simulate_fc(seed=6)
+    fc, obs, _ = simulate_lfc(seed=6)
     for i in range(10):  # 10% of the 100 conditions per system are inflated; cap is 5%
         fc = _add_response(fc, obs, f"c{50 + i:03d}", 0.5, (8, 16), seed=10 + i)
     rows, _ = detect_dominant(fc, obs, max_frac=0.05)
@@ -405,14 +405,14 @@ def test_dominance_clip_options(dominance_data):
 
 @pytest.fixture(scope="module")
 def small_data():
-    fc, obs, _ = simulate_fc(n_genes=320, n_systems=8, n_conditions=30, seed=6)
+    fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=6)
     return fc, obs
 
 
 def test_contextwgcna_nan_and_clip(small_data):
     fc, obs = small_data
     base = ContextWGCNA(fc, obs, calibrate="none")
-    assert base.fc is fc and base.preprocessing["clip_bounds"] is None  # untouched by default
+    assert base.data is fc and base.preprocessing["clip_bounds"] is None  # untouched by default
     # skip: all-NaN rows dropped, identical to dropping them by hand
     fc_nan = fc.copy()
     fc_nan.iloc[[0, 5]] = np.nan
@@ -421,7 +421,7 @@ def test_contextwgcna_nan_and_clip(small_data):
     skip = ContextWGCNA(fc_nan, obs, calibrate="none", nan="skip")
     keep = fc_nan.notna().any(axis=1)
     manual = ContextWGCNA(fc_nan[keep], obs[keep], calibrate="none")
-    assert len(skip.fc) == len(fc) - 2 and skip.fc.index.equals(manual.fc.index)
+    assert len(skip.data) == len(fc) - 2 and skip.data.index.equals(manual.data.index)
     np.testing.assert_array_equal(skip.compute_support().r, manual.compute_support().r)
     # partly-NaN rows cannot be skipped; filling works
     fc_part = fc.copy()
@@ -429,14 +429,14 @@ def test_contextwgcna_nan_and_clip(small_data):
     with pytest.raises(ValueError, match="partly NaN"):
         ContextWGCNA(fc_part, obs, calibrate="none", nan="skip")
     filled = ContextWGCNA(fc_part, obs, calibrate="none", nan=0)
-    assert (filled.fc.iloc[1, :3] == 0).all()
+    assert (filled.data.iloc[1, :3] == 0).all()
     # clip: identical to clipping by hand; percentile bounds recorded
     a = ContextWGCNA(fc, obs, calibrate="none", clip=1.5).compute_support().r
     b = ContextWGCNA(fc.clip(-1.5, 1.5), obs, calibrate="none").compute_support().r
     np.testing.assert_array_equal(a, b)
     p = ContextWGCNA(fc, obs, calibrate="none", clip="p95")
     assert np.isclose(p.preprocessing["clip_bounds"][1], np.percentile(np.abs(fc.to_numpy()), 95))
-    assert np.abs(p.fc.to_numpy()).max() <= p.preprocessing["clip_bounds"][1]
+    assert np.abs(p.data.to_numpy()).max() <= p.preprocessing["clip_bounds"][1]
 
 
 def test_linear_fc_warning(dominance_data, capsys):
@@ -502,7 +502,7 @@ def test_input_validation():
 
 @pytest.fixture(scope="module")
 def small_run():
-    fc, obs, truth = simulate_fc(n_genes=320, seed=5)
+    fc, obs, truth = simulate_lfc(n_genes=320, seed=5)
     cw = ContextWGCNA(fc, obs, support_min_t=2.0)
     return cw
 
@@ -534,7 +534,7 @@ def test_cli_given_power_skips_scan(tmp_path):
 def adata_example():
     anndata = pytest.importorskip("anndata")
     from scipy import sparse
-    fc, obs, truth = simulate_fc(n_genes=320, n_systems=8, n_conditions=40, seed=7)
+    fc, obs, truth = simulate_lfc(n_genes=320, n_systems=8, n_conditions=40, seed=7)
     ad = anndata.AnnData(X=np.zeros(fc.shape), obs=obs.copy(),
                          var=pd.DataFrame({"keep": np.arange(fc.shape[1]) < 150}, index=fc.columns))
     ad.layers["log2fc"] = sparse.csr_matrix(fc.to_numpy())  # sparse layer, X deliberately different

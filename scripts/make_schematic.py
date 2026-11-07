@@ -20,7 +20,7 @@ from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 from matplotlib.patches import FancyArrowPatch, Rectangle  # noqa: E402
 
 from ctxwgcna import ContextWGCNA, global_wgcna, similarity_matrix  # noqa: E402
-from ctxwgcna.simulate import simulate_fc  # noqa: E402
+from ctxwgcna.simulate import simulate_lfc  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "docs")
 N_SYSTEMS, POWER = 20, 12
@@ -52,12 +52,12 @@ def recovery(truth, modules):
 
 def run_example():
     """Simulate, run ContextWGCNA and the pooled baseline, and collect what the panels need."""
-    fc, obs, truth = simulate_fc(n_genes=360, n_systems=N_SYSTEMS, n_conditions=100, seed=0)
-    cw = ContextWGCNA(fc, obs)
+    lfc, obs, truth = simulate_lfc(n_genes=360, n_systems=N_SYSTEMS, n_conditions=100, seed=0)
+    cw = ContextWGCNA(lfc, obs)
     cw.run(power=POWER, min_module_size=20)
     cw.split_modules()
-    pooled_modules, _ = global_wgcna(fc, power=POWER, min_module_size=20)
-    pooled_r = similarity_matrix(fc.to_numpy())
+    pooled_modules, _ = global_wgcna(lfc, power=POWER, min_module_size=20)
+    pooled_r = similarity_matrix(lfc.to_numpy())
     i, j = PAIR
     module_of_q = cw.modules.iloc[i]
     return dict(
@@ -140,7 +140,7 @@ def panel_contexts(ax, th):
         y -= 1.35
     ax.text(6.6, 6.0, "t = arctanh(r)·√(n − 3)\nfor every gene pair and\ncontext: comparable\n"
             "across context sizes", fontsize=8, color=th["ink2"], va="center", linespacing=1.4)
-    ax.text(0.0, 0.25, "Pre-step: FC profiles much larger and broader than the\nrest of their context "
+    ax.text(0.0, 0.25, "Pre-step: LFC profiles much larger and broader than the\nrest of their context "
             "(dominant conditions) are removed first.", fontsize=7.5, color=th["muted"], linespacing=1.35)
 
 

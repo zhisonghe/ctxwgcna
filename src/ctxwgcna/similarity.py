@@ -19,7 +19,7 @@ def _unit_columns(X):
     norm = np.linalg.norm(X, axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
         Xn = X / norm
-    Xn[:, norm == 0] = 0.0  # zero-variance genes (or an all-zero FC vector for cosine)
+    Xn[:, norm == 0] = 0.0  # zero-variance genes (or an all-zero LFC vector for cosine)
     return Xn
 
 
@@ -48,7 +48,7 @@ def similarity_matrix(X, method="pearson"):
 
     pearson / spearman / bicor are centred correlations: co-variation around the context's mean.
     cosine is uncentred: it also rewards genes that move in the same direction relative to 0
-    (e.g. both up-regulated throughout a system), which is only meaningful for FC-like data.
+    (e.g. both up-regulated throughout a system), which is only meaningful for log-FC data (0 = no change).
     """
     X = np.asarray(X, dtype=np.float64)
     # Each method is "transform the columns, then take the cosine of the transformed columns".

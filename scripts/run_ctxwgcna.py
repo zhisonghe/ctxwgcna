@@ -3,8 +3,8 @@
 
 Examples
 --------
-# real data (FC matrix: rows = observations, columns = genes; obs table with the same row index)
-python scripts/run_ctxwgcna.py --fc fc.csv --obs obs.csv --context-col system --outdir results/
+# real data (log FC matrix: rows = observations, columns = genes; obs table with the same row index)
+python scripts/run_ctxwgcna.py --data lfc.csv --obs obs.csv --context-col system --outdir results/
 
 # AnnData (.h5ad): a layer instead of .X, and only the genes flagged in a boolean .var column
 python scripts/run_ctxwgcna.py --h5ad data.h5ad --layer log2fc --var-subset highly_variable --outdir results/
@@ -35,10 +35,11 @@ def read_table(path, sep):
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     io = p.add_argument_group("input / output")
-    io.add_argument("--fc", help="FC matrix (csv/tsv), rows = observations, columns = genes")
-    io.add_argument("--obs", help="observation table (csv/tsv), same row index as --fc")
-    io.add_argument("--transpose", action="store_true", help="--fc has genes as rows; transpose it")
-    io.add_argument("--h5ad", help="AnnData file (observations x genes) instead of --fc/--obs; obs = adata.obs")
+    io.add_argument("--data", "--data", dest="data",
+                    help="data matrix (csv/tsv): log FC (or expression), rows = observations, columns = genes")
+    io.add_argument("--obs", help="observation table (csv/tsv), same row index as --data")
+    io.add_argument("--transpose", action="store_true", help="--data has genes as rows; transpose it")
+    io.add_argument("--h5ad", help="AnnData file (observations x genes) instead of --data/--obs; obs = adata.obs")
     io.add_argument("--layer", default=None, help="with --h5ad: use adata.layers[LAYER] instead of adata.X")
     io.add_argument("--var-subset", default=None,
                     help="with --h5ad: boolean adata.var column selecting the genes (e.g. highly_variable)")
@@ -47,13 +48,13 @@ def parse_args(argv=None):
                     help="missing values: raise (default), skip (drop all-NaN rows), or a fill value such as 0")
     io.add_argument("--clip", default=None,
                     help="clip values before the analysis: C (+-C), LO,HI (write --clip=-3,3), or a "
-                         "percentile of |FC| such as p95")
-    io.add_argument("--simulate", action="store_true", help="use simulated demo data instead of --fc/--obs")
+                         "percentile of |value| such as p95")
+    io.add_argument("--simulate", action="store_true", help="use simulated demo data instead of --data/--obs")
     io.add_argument("--outdir", required=True)
 
-    d = p.add_argument_group("dominant FC profiles (see README: 'Dominant conditions')")
+    d = p.add_argument_group("dominant LFC profiles (see README: 'Dominant conditions')")
     d.add_argument("--detect-dominant", action="store_true",
-                   help="flag FC profiles with far larger and broader changes than the rest of their context")
+                   help="flag LFC profiles with far larger and broader changes than the rest of their context")
     d.add_argument("--exclude-dominant", action="store_true",
                    help="detect AND remove flagged profiles before the network analysis")
     d.add_argument("--dominant-label-col", default="condition",
@@ -103,27 +104,27 @@ def parse_args(argv=None):
     o.add_argument("--save-matrices", action="store_true", help="save summary r, adjacency, TOM (npz)")
     o.add_argument("--seed", type=int, default=0)
     args = p.parse_args(argv)
-    sources = [args.simulate, bool(args.fc or args.obs), bool(args.h5ad)]
-    if sum(sources) != 1 or (args.fc or args.obs) and not (args.fc and args.obs):
-        p.error("give exactly one input: --fc and --obs, --h5ad, or --simulate")
+    sources = [args.simulate, bool(args.data or args.obs), bool(args.h5ad)]
+    if sum(sources) != 1 or (args.data or args.obs) and not (args.data and args.obs):
+        p.error("give exactly one input: --data and --obs, --h5ad, or --simulate")
     if (args.layer or args.var_subset) and not args.h5ad:
         p.error("--layer and --var-subset need --h5ad")
     return args
 
 
 def load_data(args):
-    """Return (fc, obs, truth): the data matrix, the observation table, and simulation truth (or None)."""
+    """Return (data, obs, truth): the data matrix, the observation table, and simulation truth (or None)."""
     if args.simulate:
-        from ctxwgcna.simulate import simulate_fc
-        return simulate_fc(n_genes=1000, n_systems=20, n_conditions=300, seed=args.seed)
+        from ctxwgcna.simulate import simulate_lfc
+        return simulate_lfc(n_genes=1000, n_systems=20, n_conditions=300, seed=args.seed)
     if args.h5ad:
         import anndata  # optional dependency: pip install -e ".[anndata]"
-        fc, obs = as_frames(anndata.read_h5ad(args.h5ad), layer=args.layer, genes=args.var_subset)
-        return fc, obs, None
-    fc = read_table(args.fc, args.sep)
-    fc = fc.T if args.transpose else fc
+        data, obs = as_frames(anndata.read_h5ad(args.h5ad), layer=args.layer, genes=args.var_subset)
+        return data, obs, None
+    data = read_table(args.data, args.sep)
+    data = data.T if args.transpose else data
     obs = read_table(args.obs, args.sep)
-    return fc, obs, None
+    return data, obs, None
 
 
 def _nan_option(text):
@@ -139,14 +140,14 @@ def _clip_option(text):
     return parts[0] if len(parts) == 1 else tuple(parts)
 
 
-def dominance_step(args, fc, obs, out):
-    """Detect dominant FC profiles, write the reports, and remove them if --exclude-dominant.
+def dominance_step(args, data, obs, out):
+    """Detect dominant LFC profiles, write the reports, and remove them if --exclude-dominant.
 
-    Returns (fc, obs, n_removed).
+    Returns (data, obs, n_removed).
     """
     label_col = args.dominant_label_col if args.dominant_label_col in obs.columns else None
     rows, summary = detect_dominant(
-        fc, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
+        data, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
         min_z=args.dominant_min_z, min_gene_frac=args.dominant_min_gene_frac,
         max_frac=args.dominant_max_frac,
         nan=_nan_option(args.nan if args.dominant_nan is None else args.dominant_nan),
@@ -155,11 +156,11 @@ def dominance_step(args, fc, obs, out):
     if summary is not None:
         summary.to_csv(out("dominance_summary.csv"))
     if not args.exclude_dominant:
-        return fc, obs, 0
-    n_before = len(fc)
-    fc, obs = drop_dominant(fc, obs, rows)
-    print(f"removed {n_before - len(fc)} dominant FC profiles; {len(fc)} remain")
-    return fc, obs, n_before - len(fc)
+        return data, obs, 0
+    n_before = len(data)
+    data, obs = drop_dominant(data, obs, rows)
+    print(f"removed {n_before - len(data)} dominant LFC profiles; {len(data)} remain")
+    return data, obs, n_before - len(data)
 
 
 def main(argv=None):
@@ -172,15 +173,15 @@ def main(argv=None):
     t0 = time.time()
 
     # --- input, optional removal of dominant profiles ---
-    fc, obs, truth = load_data(args)
-    print(f"FC matrix: {fc.shape[0]} observations x {fc.shape[1]} genes")
+    data, obs, truth = load_data(args)
+    print(f"data matrix: {data.shape[0]} observations x {data.shape[1]} genes")
     n_dropped = 0
     if args.detect_dominant or args.exclude_dominant:
-        fc, obs, n_dropped = dominance_step(args, fc, obs, out)
+        data, obs, n_dropped = dominance_step(args, data, obs, out)
 
     # --- steps 1-4: contexts and context support ---
     contexts = args.contexts.split(",") if args.contexts else None
-    cw = ContextWGCNA(fc, obs, context_col=args.context_col, contexts=contexts, similarity=args.similarity,
+    cw = ContextWGCNA(data, obs, context_col=args.context_col, contexts=contexts, similarity=args.similarity,
                       top_n=args.top_n, network_type=args.network_type, weighting=args.weighting,
                       calibrate=args.calibrate, n_perm=args.n_perm, tom_mode=args.tom_mode,
                       min_obs=args.min_obs, seed=args.seed, nan=_nan_option(args.nan),
@@ -218,7 +219,7 @@ def main(argv=None):
 
     # --- optional extras ---
     if args.global_baseline:
-        glob, gp = global_wgcna(fc, similarity=args.similarity, network_type=args.network_type,
+        glob, gp = global_wgcna(data, similarity=args.similarity, network_type=args.network_type,
                                 power=args.power, min_module_size=args.min_module_size,
                                 deep_split=args.deep_split, nan=_nan_option(args.nan),
                                 clip=_clip_option(args.clip))

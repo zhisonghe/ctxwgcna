@@ -301,7 +301,7 @@ def compute_support(blocks, method="pearson", top_n=3, selection="positive", wei
     else:
         null_mean, null_sd = _permutation_null(blocks, method, top_n, selection, weighting, n_perm,
                                                chunk_bytes, rng)
-        # cosine's null mean differs per pair (it depends on the genes' mean FC): keep it per pair;
+        # cosine's null mean differs per pair (it depends on the genes' mean LFC): keep it per pair;
         # for centred methods the null is the same for all pairs, so pool it (less noisy)
         off = ~np.eye(G, dtype=bool)
         bias = null_mean if method == "cosine" else float(null_mean[off].mean())

@@ -21,13 +21,13 @@ class ContextWGCNA:
                         dynamic tree cut -> per-module context profiles
       then optionally   split_modules(): overlapping, context-defined submodules per module
 
-    Typical use:  cw = ContextWGCNA(fc, obs); cw.run(); cw.split_modules()
+    Typical use:  cw = ContextWGCNA(data, obs); cw.run(); cw.split_modules()
              or:  cw = ContextWGCNA(adata, layer="log2fc", genes="highly_variable")
     Each step can also be called on its own; missing earlier steps are run automatically.
 
-    :param fc: the data: a DataFrame (rows = observations, i.e. FC profiles or samples; columns =
+    :param data: the data: a DataFrame (rows = observations, i.e. LFC profiles or samples; columns =
         genes), or an AnnData object (observations x genes).
-    :param obs: DataFrame indexed like fc with context annotations. Required for a DataFrame;
+    :param obs: DataFrame indexed like data with context annotations. Required for a DataFrame;
         for AnnData it defaults to adata.obs.
     :param layer: AnnData only: use adata.layers[layer] instead of adata.X.
     :param genes: optional gene subset: a list of gene names, or (AnnData only) the name of a boolean
@@ -42,12 +42,12 @@ class ContextWGCNA:
         (e.g. untested combinations); partly-NaN rows still raise, since correlations here need
         complete rows. A number, e.g. 0: fill NaN with it.
     :param clip: limit extreme values before the correlations: None (default), c (clip to [-c, c]),
-        (lo, hi), or 'pNN' (+- the NNth percentile of |FC| over all values, e.g. 'p95').
-        .fc / .obs hold the data after this step; .preprocessing records what was done.
+        (lo, hi), or 'pNN' (+- the NNth percentile of |value| over all values, e.g. 'p95').
+        .data / .obs hold the data after this step; .preprocessing records what was done.
     See README.md section 4 for all parameters.
     """
 
-    def __init__(self, fc, obs=None, context_col="system", contexts=None, similarity="pearson", top_n=3,
+    def __init__(self, data, obs=None, context_col="system", contexts=None, similarity="pearson", top_n=3,
                  network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
                  tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
                  store_context_t="auto", store_max_mb=2048, layer=None, genes=None, nan="raise",
@@ -55,12 +55,12 @@ class ContextWGCNA:
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
-        fc, obs = as_frames(fc, obs, layer=layer, genes=genes)
-        fc, obs, self.preprocessing = prepare_frames(fc, obs, nan=nan, clip=clip)  # NaN rule, clipping
+        data, obs = as_frames(data, obs, layer=layer, genes=genes)
+        data, obs, self.preprocessing = prepare_frames(data, obs, nan=nan, clip=clip)  # NaN rule, clipping
         if similarity == "cosine":  # uncentred: needs 0 = "no change"
-            warn_if_linear_fc(fc.to_numpy(dtype=np.float64), "similarity='cosine'")
-        self.fc, self.obs, self.layer = fc, obs, layer
-        self.genes = pd.Index(fc.columns)
+            warn_if_linear_fc(data.to_numpy(dtype=np.float64), "similarity='cosine'")
+        self.data, self.obs, self.layer = data, obs, layer
+        self.genes = pd.Index(data.columns)
         self.context_col = context_col
         self.similarity = similarity
         self.top_n = top_n
@@ -72,7 +72,7 @@ class ContextWGCNA:
         self.store_context_t, self.store_max_mb = store_context_t, store_max_mb
 
         # --- step 1 now; results of later steps are filled in as they run ---
-        self.blocks = make_context_blocks(fc, obs, context_col, contexts=contexts, min_obs=min_obs)
+        self.blocks = make_context_blocks(data, obs, context_col, contexts=contexts, min_obs=min_obs)
         self.support = None  # ContextSupport (steps 2-4)
         self.power = None  # soft-threshold power
         self.sft = None  # scale-free fit table
@@ -209,21 +209,21 @@ class ContextWGCNA:
         return out
 
 
-def global_wgcna(fc, similarity="pearson", network_type="signed", power=None, powers=None,
+def global_wgcna(data, similarity="pearson", network_type="signed", power=None, powers=None,
                  min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None,
                  nan="raise", clip=None):
     """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
 
-    fc is a DataFrame (observations x genes) or AnnData (with optional layer / genes / nan / clip, as
+    data is a DataFrame (observations x genes) or AnnData (with optional layer / genes / nan / clip, as
     in ContextWGCNA). Returns (module labels, power used).
     """
-    fc, _ = as_frames(fc, None, layer=layer, genes=genes)
-    fc, _, _ = prepare_frames(fc, None, nan=nan, clip=clip, verbose=False)
-    r = similarity_matrix(fc.to_numpy(), similarity)
+    data, _ = as_frames(data, None, layer=layer, genes=genes)
+    data, _, _ = prepare_frames(data, None, nan=nan, clip=clip, verbose=False)
+    r = similarity_matrix(data.to_numpy(), similarity)
     if power is None:
         sft = _net.scale_free_table(r, _net.DEFAULT_POWERS if powers is None else powers, network_type)
         power, _ = _net.pick_power(sft, r2_cut, mean_cut)
     adj = _net.adjacency_from_r(r, power, network_type)
     tom = _net.context_tom(adj, mode="standard")
-    labels, _ = _mod.detect_modules(tom, fc.columns, min_module_size=min_module_size, deep_split=deep_split)
+    labels, _ = _mod.detect_modules(tom, data.columns, min_module_size=min_module_size, deep_split=deep_split)
     return labels, power

@@ -1,4 +1,4 @@
-"""Synthetic FC data with global and context-local co-regulation, for testing and benchmarking."""
+"""Synthetic log-FC data with global and context-local co-regulation, for testing and benchmarking."""
 import numpy as np
 import pandas as pd
 
@@ -18,11 +18,11 @@ DEFAULT_TRUTH = [("G1", 0, 60), ("L1", 60, 120), ("L2", 120, 180),
                  ("P", 180, 220), ("Q", 220, 260), ("R", 260, 300)]
 
 
-def simulate_fc(n_genes=500, n_systems=10, n_conditions=100, design=None, truth=None,
+def simulate_lfc(n_genes=500, n_systems=10, n_conditions=100, design=None, truth=None,
                 loading=(0.6, 1.0), noise_sd=1.0, seed=0):
-    """Return (fc, obs, truth_labels).
+    """Return (lfc, obs, truth_labels).
 
-    fc rows are (system, condition) observations, columns genes. In each system a co-regulated
+    lfc rows are (system, condition) observations, columns genes. In each system a co-regulated
     gene set shares a latent condition profile f(c) scaled by gene-specific loadings; outside its
     active systems the set is pure noise.
     """
@@ -32,21 +32,21 @@ def simulate_fc(n_genes=500, n_systems=10, n_conditions=100, design=None, truth=
     systems = [f"sys{s}" for s in range(n_systems)]
     conditions = [f"c{c:03d}" for c in range(n_conditions)]
 
-    fc = noise_sd * rng.standard_normal((n_systems, n_conditions, n_genes))
+    lfc = noise_sd * rng.standard_normal((n_systems, n_conditions, n_genes))
     for genes, active in design.values():
         genes = np.asarray(list(genes))
         active_systems = range(n_systems) if active == "all" else active
         loadings = rng.uniform(*loading, size=len(genes))  # fixed per gene, shared across systems
         for s in active_systems:
             # one latent condition profile per system, scaled by each gene's loading
-            fc[s][:, genes] += rng.standard_normal((n_conditions, 1)) * loadings
+            lfc[s][:, genes] += rng.standard_normal((n_conditions, 1)) * loadings
 
     gene_names = [f"g{i:04d}" for i in range(n_genes)]
     obs = pd.DataFrame([(s, c) for s in systems for c in conditions], columns=["system", "condition"])
     obs.index = [f"{s}|{c}" for s, c in zip(obs.system, obs.condition)]
-    fc = pd.DataFrame(fc.reshape(n_systems * n_conditions, n_genes), index=obs.index, columns=gene_names)
+    lfc = pd.DataFrame(lfc.reshape(n_systems * n_conditions, n_genes), index=obs.index, columns=gene_names)
 
     labels = np.array(["noise"] * n_genes, dtype=object)
     for name, a, b in truth:
         labels[a:b] = name
-    return fc, obs, pd.Series(labels, index=gene_names, name="truth")
+    return lfc, obs, pd.Series(labels, index=gene_names, name="truth")

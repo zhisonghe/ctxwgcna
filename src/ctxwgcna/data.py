@@ -23,7 +23,7 @@ def is_anndata(data):
 
 
 def as_frames(data, obs=None, layer=None, genes=None):
-    """Return (fc, obs) DataFrames from either a DataFrame + obs table or an AnnData object.
+    """Return (data, obs) DataFrames from either a DataFrame + obs table or an AnnData object.
 
     :param data: DataFrame (rows = observations, columns = genes), or AnnData (adata.X or a layer
         holds observations x genes; adata.obs the annotations).
@@ -56,8 +56,8 @@ def as_frames(data, obs=None, layer=None, genes=None):
         if X is None:
             raise ValueError("adata.X is empty; pass layer=... to use one of adata.layers")
         X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)  # sparse -> dense
-        fc = pd.DataFrame(X, index=pd.Index(adata.obs_names), columns=pd.Index(adata.var_names))
-        return fc, (adata.obs if obs is None else obs)
+        data = pd.DataFrame(X, index=pd.Index(adata.obs_names), columns=pd.Index(adata.var_names))
+        return data, (adata.obs if obs is None else obs)
 
     if layer is not None:
         raise ValueError("layer is only used with AnnData input")
@@ -73,13 +73,13 @@ def as_frames(data, obs=None, layer=None, genes=None):
     return data, obs
 
 
-def check_unique(fc, obs=None):
+def check_unique(data, obs=None):
     """Raise if observation (row) or gene (column) labels are duplicated.
 
-    Duplicated labels make row alignment between `fc` and `obs` ambiguous, and gene lookups by name
+    Duplicated labels make row alignment between `data` and `obs` ambiguous, and gene lookups by name
     return several positions instead of one.
     """
-    indexes = [("fc row (observation)", fc.index), ("fc column (gene)", fc.columns)]
+    indexes = [("data row (observation)", data.index), ("data column (gene)", data.columns)]
     if obs is not None:
         indexes.append(("obs row", obs.index))
     for what, index in indexes:
@@ -98,16 +98,16 @@ def check_finite(values, index):
     nan = np.isnan(values)
     if nan.any():
         all_nan = nan.all(axis=1)
-        msg = (f"fc contains NaN in {int(nan.any(axis=1).sum())} of {len(values)} rows "
+        msg = (f"data contains NaN in {int(nan.any(axis=1).sum())} of {len(values)} rows "
                f"({int(all_nan.sum())} of them entirely NaN, e.g. {list(index[all_nan][:3])}).")
         if all_nan.any():
-            msg += " Drop untested rows first, e.g. keep = fc.notna().any(axis=1); fc, obs = fc[keep], obs[keep]."
+            msg += " Drop untested rows first, e.g. keep = data.notna().any(axis=1); data, obs = data[keep], obs[keep]."
         if (nan.any(axis=1) & ~all_nan).any():
             msg += (" Partly-NaN rows: drop the affected genes, or fill with 0 only if 'not measured' "
                     "really means 'no change'.")
         raise ValueError(msg)
     if not np.isfinite(values).all():
-        raise ValueError("fc contains infinite values; cap or filter them first")
+        raise ValueError("data contains infinite values; cap or filter them first")
 
 
 def _clip_bounds(X, clip):
@@ -121,7 +121,7 @@ def _clip_bounds(X, clip):
         c = float(np.percentile(finite, float(clip[1:]))) if finite.size else 0.0
         if c <= 0:
             raise ValueError(f"clip={clip!r} gives a cutoff of {c}; use a higher percentile or a value")
-        return -c, c, f"+-{c:.3g} ({clip} of |FC|)"
+        return -c, c, f"+-{c:.3g} ({clip} of |value|)"
     if np.isscalar(clip):
         if not clip > 0:
             raise ValueError("clip as a single value must be > 0 (it is used as +-clip)")
@@ -174,7 +174,7 @@ def prepare_values(X, index, nan="raise", clip=None):
         info["clip_desc"] = desc
         X = np.clip(X, lo, hi)
     if np.isinf(X).any():
-        raise ValueError("fc contains infinite values; pass clip=... or cap them first")
+        raise ValueError("data contains infinite values; pass clip=... or cap them first")
     return X, scored, info
 
 
@@ -191,22 +191,22 @@ def warn_if_linear_fc(X, what):
               "assumes log FC (0 = no change); pass log2(FC) instead.")
 
 
-def prepare_frames(fc, obs, nan="raise", clip=None, verbose=True):
-    """NaN rule + clipping for the network: returns (fc, obs, info) with all-NaN rows dropped.
+def prepare_frames(data, obs, nan="raise", clip=None, verbose=True):
+    """NaN rule + clipping for the network: returns (data, obs, info) with all-NaN rows dropped.
 
     Unlike detect_dominant, nan='skip' cannot ignore single NaN entries here: correlations would need
     pairwise-complete observations (a different n per gene pair). Rows that are only partly NaN
     therefore raise an error under 'skip'; fill them (nan=0) or drop the affected genes.
     """
-    X, scored, info = prepare_values(fc.to_numpy(dtype=np.float64), fc.index, nan, clip)
+    X, scored, info = prepare_values(data.to_numpy(dtype=np.float64), data.index, nan, clip)
     if nan == "skip" and np.isnan(X[scored]).any():
         n_part = info["n_nan_rows"] - info["n_all_nan_rows"]
         raise ValueError(f"{n_part} rows are partly NaN; nan='skip' only drops rows that are entirely NaN. "
                          "Fill them (nan=0, if 'not measured' means 'no change') or drop the affected genes.")
     if info["n_nan_rows"] == 0 and info["clip_bounds"] is None:
-        return fc, obs, info  # nothing changed: keep the caller's frame as is
-    kept = fc.index[scored]
-    out = pd.DataFrame(X[scored], index=kept, columns=fc.columns)
+        return data, obs, info  # nothing changed: keep the caller's frame as is
+    kept = data.index[scored]
+    out = pd.DataFrame(X[scored], index=kept, columns=data.columns)
     if obs is not None:
         obs = obs[obs.index.isin(kept)]
     if verbose:
@@ -219,12 +219,12 @@ def prepare_frames(fc, obs, nan="raise", clip=None, verbose=True):
     return out, obs, info
 
 
-def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
-    """Group the rows of `fc` by `obs[context_col]`.
+def make_context_blocks(data, obs, context_col, contexts=None, min_obs=10):
+    """Group the rows of `data` by `obs[context_col]`.
 
-    :param fc: DataFrame, rows = observations (e.g. one system x condition FC profile, or one sample
+    :param data: DataFrame, rows = observations (e.g. one system x condition LFC profile, or one sample
         of an expression matrix), columns = genes.
-    :param obs: DataFrame with the same row labels as `fc`, holding e.g. 'system' and 'condition'.
+    :param obs: DataFrame with the same row labels as `data`, holding e.g. 'system' and 'condition'.
     :param context_col: column of `obs` defining the contexts (e.g. 'system' or 'condition').
         Within a context, similarities are computed across its observations.
     :param contexts: optional subset (list) of context names to use, in this order.
@@ -237,15 +237,15 @@ def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
         raise ValueError("min_obs must be >= 4 (Fisher z standard error is 1/sqrt(n - 3))")
     if obs is None:
         raise ValueError("obs (the observation table) is required")
-    check_unique(fc, obs)
-    if not fc.index.equals(obs.index):
-        if set(fc.index) != set(obs.index):
-            raise ValueError("fc and obs must have the same row index (observations)")
-        obs = obs.loc[fc.index]  # same labels, different order: align obs to fc
+    check_unique(data, obs)
+    if not data.index.equals(obs.index):
+        if set(data.index) != set(obs.index):
+            raise ValueError("data and obs must have the same row index (observations)")
+        obs = obs.loc[data.index]  # same labels, different order: align obs to data
     if context_col not in obs.columns:
         raise ValueError(f"{context_col!r} is not a column of obs")
-    values = fc.to_numpy(dtype=np.float64)
-    check_finite(values, fc.index)
+    values = data.to_numpy(dtype=np.float64)
+    check_finite(values, data.index)
 
     labels = obs[context_col]
     names = list(pd.unique(labels)) if contexts is None else list(contexts)
@@ -262,7 +262,7 @@ def make_context_blocks(fc, obs, context_col, contexts=None, min_obs=10):
         if n < min_obs:
             dropped.append((name, n))
             continue
-        blocks.append(ContextBlock(name=str(name), obs_names=fc.index[in_context], X=values[in_context]))
+        blocks.append(ContextBlock(name=str(name), obs_names=data.index[in_context], X=values[in_context]))
     if dropped:
         print(f"Dropped {len(dropped)} context(s) with < {min_obs} observations: {dropped}")
     if not blocks:
