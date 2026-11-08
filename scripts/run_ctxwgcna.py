@@ -50,6 +50,9 @@ def parse_args(argv=None):
                     help="treat |value| > MAX_ABS as missing (GLM LFCs of ~30 from zero counts): auto (default, "
                          "cutoff from the data; nothing masked without a separate mode of large values), a "
                          "number such as 15, or none; set to 0 in the network, ignored in the dominance scoring")
+    io.add_argument("--max-artifact-z", type=float, default=None,
+                    help="leave out rows with unusually many masked genes for their context (robust z of the "
+                         "masked fraction > this, e.g. 3); default: keep all")
     io.add_argument("--clip", default=None,
                     help="clip values before the analysis: C (+-C), LO,HI (write --clip=-3,3), or a "
                          "percentile of |value| such as p95")
@@ -61,12 +64,23 @@ def parse_args(argv=None):
                    help="flag LFC profiles with far larger and broader changes than the rest of their context")
     d.add_argument("--exclude-dominant", action="store_true",
                    help="detect AND remove flagged profiles before the network analysis")
-    d.add_argument("--dominant-label-col", default="condition",
-                   help="obs column to summarise flagged profiles by (default: condition)")
-    d.add_argument("--dominant-min-fold", type=float, default=5.0)
-    d.add_argument("--dominant-min-z", type=float, default=4.0)
-    d.add_argument("--dominant-min-gene-frac", type=float, default=0.10)
-    d.add_argument("--dominant-max-frac", type=float, default=0.05)
+    # old flag names (before 2026-11) are kept as aliases
+    d.add_argument("--dominant-condition-col", "--dominant-label-col", dest="dominant_condition_col",
+                   default="condition", help="obs column to summarise flagged profiles by (default: condition)")
+    d.add_argument("--dominant-min-magnitude-ratio", "--dominant-min-fold", dest="dominant_min_magnitude_ratio",
+                   type=float, default=5.0,
+                   help="row's sum of squared LFC / median of its context must be >= this (default 5)")
+    d.add_argument("--dominant-min-magnitude-z", "--dominant-min-z", dest="dominant_min_magnitude_z",
+                   type=float, default=4.0, help="...and its robust z within the context >= this (default 4)")
+    d.add_argument("--dominant-min-frac-genes-extreme", "--dominant-min-gene-frac",
+                   dest="dominant_min_frac_genes_extreme", type=float, default=0.10,
+                   help="...and at least this fraction of its genes extreme (default 0.10)")
+    d.add_argument("--dominant-gene-extreme-z", type=float, default=5.0,
+                   help="a gene is extreme in a row at >= this robust z within the context (default 5)")
+    d.add_argument("--dominant-max-frac-flagged", "--dominant-max-frac", dest="dominant_max_frac_flagged",
+                   type=float, default=0.05, help="flag at most this fraction of a context's rows (default 0.05)")
+    d.add_argument("--dominant-max-artifact-z", type=float, default=None,
+                   help="artifact-row exclusion for the dominance scoring only (default: same as --max-artifact-z)")
     d.add_argument("--dominant-nan", default=None,
                    help="NaN rule for the dominance scoring only (default: same as --nan)")
     d.add_argument("--dominant-max-abs", type=_max_abs_option, default=None,
@@ -165,11 +179,14 @@ def dominance_step(args, data, obs, out):
 
     Returns (data, obs, n_removed).
     """
-    label_col = args.dominant_label_col if args.dominant_label_col in obs.columns else None
+    condition_col = args.dominant_condition_col if args.dominant_condition_col in obs.columns else None
     rows, summary = detect_dominant(
-        data, obs, context_col=args.context_col, label_col=label_col, min_fold=args.dominant_min_fold,
-        min_z=args.dominant_min_z, min_gene_frac=args.dominant_min_gene_frac,
-        max_frac=args.dominant_max_frac,
+        data, obs, context_col=args.context_col, condition_col=condition_col,
+        min_magnitude_ratio=args.dominant_min_magnitude_ratio, min_magnitude_z=args.dominant_min_magnitude_z,
+        min_frac_genes_extreme=args.dominant_min_frac_genes_extreme,
+        gene_extreme_z=args.dominant_gene_extreme_z, max_frac_flagged=args.dominant_max_frac_flagged,
+        max_artifact_z=(args.max_artifact_z if args.dominant_max_artifact_z is None
+                        else args.dominant_max_artifact_z),
         nan=_nan_option(args.nan if args.dominant_nan is None else args.dominant_nan),
         clip=_clip_option(args.clip if args.dominant_clip is None else args.dominant_clip),
         max_abs=_max_abs_value(args.max_abs if args.dominant_max_abs is None else args.dominant_max_abs))
@@ -206,7 +223,8 @@ def main(argv=None):
                       top_n=args.top_n, network_type=args.network_type, weighting=args.weighting,
                       calibrate=args.calibrate, n_perm=args.n_perm, tom_mode=args.tom_mode,
                       min_obs=args.min_obs, seed=args.seed, nan=_nan_option(args.nan),
-                      clip=_clip_option(args.clip), max_abs=_max_abs_value(args.max_abs))
+                      clip=_clip_option(args.clip), max_abs=_max_abs_value(args.max_abs),
+                      max_artifact_z=args.max_artifact_z)
     print(f"{len(cw.blocks)} contexts: " + ", ".join(f"{b.name}(n={b.n_obs})" for b in cw.blocks))
     sup = cw.compute_support()
     print(f"support: top_n={sup.top_n}, selection={sup.selection}, calibrate={sup.calibrate}, "
@@ -240,7 +258,8 @@ def main(argv=None):
 
     # --- optional extras ---
     if args.global_baseline:
-        glob, gp = global_wgcna(data, similarity=args.similarity, network_type=args.network_type,
+        # same rows as the context network (all-NaN and artifact-excluded rows left out)
+        glob, gp = global_wgcna(data.loc[cw.data.index], similarity=args.similarity, network_type=args.network_type,
                                 power=args.power, min_module_size=args.min_module_size,
                                 deep_split=args.deep_split, nan=_nan_option(args.nan),
                                 clip=_clip_option(args.clip), max_abs=_max_abs_value(args.max_abs))

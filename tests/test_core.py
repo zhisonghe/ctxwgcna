@@ -265,13 +265,13 @@ def test_detects_multiple_and_system_specific_dominant_profiles(dominance_data):
     assert rows["dominant"].equals(pd.Series(expected.to_numpy(), index=fc.index, name="dominant"))
     assert summary.loc["c002", "n_dominant"] == 2
     # breadth summaries agree with the per-row values
-    fe = rows.groupby("label")["frac_extreme"]
+    fe = rows.groupby("condition")["frac_genes_extreme"]
     for stat in ("max", "median", "mean", "min"):
-        assert np.allclose(summary[f"{stat}_frac_extreme"], fe.agg(stat).loc[summary.index])
+        assert np.allclose(summary[f"{stat}_frac_genes_extreme"], fe.agg(stat).loc[summary.index])
     assert summary.loc["c002", "n_broad"] >= 2 and summary.loc["c010", "n_broad"] == 0
     # large but narrow (6% of genes) is kept: that is how a genuine few-condition programme looks
     assert not rows.loc[obs.condition == "c010", "dominant"].any()
-    assert rows.loc[obs.condition == "c010", "fold"].min() > 5  # ...although its magnitude is large
+    assert rows.loc[obs.condition == "c010", "magnitude_ratio"].min() > 5  # ...although its magnitude is large
     fc2, obs2 = drop_dominant(fc, obs, rows)
     assert len(fc2) == len(fc) - expected.sum() and fc2.index.equals(obs2.index)
 
@@ -286,7 +286,7 @@ def test_cap_limits_flagged_fraction_and_warns(capsys):
     fc, obs, _ = simulate_lfc(seed=6)
     for i in range(10):  # 10% of the 100 conditions per system are inflated; cap is 5%
         fc = _add_response(fc, obs, f"c{50 + i:03d}", 0.5, (8, 16), seed=10 + i)
-    rows, _ = detect_dominant(fc, obs, max_frac=0.05)
+    rows, _ = detect_dominant(fc, obs, max_frac_flagged=0.05)
     per_sys = rows.groupby("context")[["candidate", "dominant"]].sum()
     assert (per_sys["candidate"] == 10).all() and (per_sys["dominant"] == 5).all()
     assert "WARNING" in capsys.readouterr().out
@@ -308,7 +308,7 @@ def test_dominance_small_context_with_flat_genes_is_detected():
     X[0, :200] = 8
     rows, _ = detect_dominant(*_single_context(X), verbose=False)
     assert rows["dominant"].tolist() == [True] + [False] * 19
-    assert rows.iloc[0]["frac_extreme"] >= 0.4
+    assert rows.iloc[0]["frac_genes_extreme"] >= 0.4
 
 
 def test_dominance_zero_median_magnitude():
@@ -336,7 +336,7 @@ def test_dominance_validates_columns_and_labels():
     fc, obs = _single_context(np.random.default_rng(0).normal(size=(20, 30)))
     with pytest.raises(ValueError, match="not a column"):
         detect_dominant(fc, obs.drop(columns="condition"), verbose=False)
-    rows, summary = detect_dominant(fc, obs.drop(columns="condition"), label_col=None, verbose=False)
+    rows, summary = detect_dominant(fc, obs.drop(columns="condition"), condition_col=None, verbose=False)
     assert summary is None and len(rows) == 20
     with pytest.raises(ValueError, match="duplicated"):
         detect_dominant(fc.iloc[[0, 0, 1]], obs.iloc[[0, 0, 1]], verbose=False)
@@ -350,7 +350,7 @@ def test_dominance_rejects_nan_rows():
         detect_dominant(fc, obs, verbose=False)
     keep = fc.notna().any(axis=1)
     rows, _ = detect_dominant(fc[keep], obs[keep], verbose=False)
-    assert len(rows) == 19 and rows["fold"].notna().all()
+    assert len(rows) == 19 and rows["magnitude_ratio"].notna().all()
 
 
 def test_dominance_nan_options(dominance_data):
@@ -363,12 +363,12 @@ def test_dominance_nan_options(dominance_data):
     # skip: identical to dropping the all-NaN rows; those rows come back unscored, never dominant
     rows, summary = detect_dominant(fc, obs, nan="skip", verbose=False)
     pd.testing.assert_frame_equal(rows.loc[keep], ref_rows)
-    assert rows.loc[untested, "fold"].isna().all() and not rows.loc[untested, "dominant"].any()
+    assert rows.loc[untested, "magnitude_ratio"].isna().all() and not rows.loc[untested, "dominant"].any()
     assert summary.loc["c003", "n_contexts"] == ref_sum.loc["c003", "n_contexts"]
     assert rows.attrs["preprocessing"]["n_all_nan_rows"] == 2
     # fill: NaN -> 0, untested rows are scored as "no change"
     rows0, _ = detect_dominant(fc, obs, nan=0, verbose=False)
-    assert (rows0.loc[untested, "fold"] == 0).all()
+    assert (rows0.loc[untested, "magnitude_ratio"] == 0).all()
     # skip with a few NaN genes in a dominant row: still flagged
     fc2 = fc[keep].copy()
     dom_row = ref_rows.index[ref_rows.dominant][0]
@@ -459,7 +459,60 @@ def test_cli_fc_alias():
     for flag in ("--data", "--fc"):
         args = cli.parse_args([flag, "x.csv", "--obs", "o.csv", "--outdir", "out"])
         assert args.data == "x.csv"
+    # old dominance flag names still work
+    old = cli.parse_args(["--simulate", "--outdir", "o", "--dominant-min-fold", "3", "--dominant-label-col", "c",
+                          "--dominant-max-frac", "0.1", "--dominant-min-z", "2", "--dominant-min-gene-frac", "0.2"])
+    new = cli.parse_args(["--simulate", "--outdir", "o", "--dominant-min-magnitude-ratio", "3",
+                          "--dominant-condition-col", "c", "--dominant-max-frac-flagged", "0.1",
+                          "--dominant-min-magnitude-z", "2", "--dominant-min-frac-genes-extreme", "0.2"])
+    assert vars(old) == vars(new)
 
+
+def test_dominance_old_parameter_names(dominance_data):
+    fc, obs = dominance_data
+    new, s_new = detect_dominant(fc, obs, min_magnitude_ratio=4, min_magnitude_z=3, min_frac_genes_extreme=0.2,
+                                 gene_extreme_z=4, max_frac_flagged=0.1, condition_col="condition", verbose=False)
+    with pytest.warns(FutureWarning, match="is now called") as record:
+        old, s_old = detect_dominant(fc, obs, min_fold=4, min_z=3, min_gene_frac=0.2, extreme_z=4,
+                                     max_frac=0.1, label_col="condition", verbose=False)
+    assert len(record) == 6 and "min_fold= is now called min_magnitude_ratio=" in str(record[0].message)
+    pd.testing.assert_frame_equal(new, old)
+    pd.testing.assert_frame_equal(s_new, s_old)
+    with pytest.raises(TypeError, match="min_foldx"):
+        detect_dominant(fc, obs, min_foldx=4, verbose=False)
+
+
+def test_artifact_row_exclusion(small_data):
+    lfc, obs = small_data
+    rng = np.random.default_rng(3)
+    # background artifacts in every row (~1% of genes), and three rows with 30% (too few cells)
+    art = rng.random(lfc.shape) < 0.01
+    bad = [np.flatnonzero((obs.system == s).to_numpy())[1] for s in obs.system.unique()[:3]]
+    art[bad] = rng.random((3, lfc.shape[1])) < 0.3
+    data = lfc.mask(art, 28.0 * np.sign(rng.standard_normal(lfc.shape)))
+    rows, summary = detect_dominant(data, obs, max_abs=15, max_artifact_z=3, verbose=False)
+    assert rows.index[rows.artifact_excluded].tolist() == lfc.index[bad].tolist()
+    assert rows.loc[rows.artifact_excluded, "magnitude_ratio"].isna().all()
+    assert not rows.loc[rows.artifact_excluded, "dominant"].any()
+    assert np.allclose(rows["frac_masked"], art.sum(axis=1) / lfc.shape[1])
+    assert summary["n_artifact_excluded"].sum() == 3 and rows.attrs["preprocessing"]["n_artifact_rows"] == 3
+    # the remaining rows are scored as if the excluded rows were not there
+    keep = ~rows.artifact_excluded.to_numpy()
+    ref, _ = detect_dominant(data[keep], obs[keep], max_abs=15, verbose=False)
+    cols = ["magnitude_ratio", "magnitude_z", "frac_genes_extreme", "dominant"]
+    pd.testing.assert_frame_equal(rows.loc[keep, cols], ref[cols])
+    # default (None): nothing excluded, z still reported
+    rows_all, _ = detect_dominant(data, obs, max_abs=15, verbose=False)
+    assert not rows_all.artifact_excluded.any() and (rows_all.loc[lfc.index[bad], "artifact_z"] > 3).all()
+    # network: the same rows are left out
+    cw = ContextWGCNA(data, obs, calibrate="none", max_abs=15, max_artifact_z=3)
+    assert len(cw.data) == len(lfc) - 3 and not cw.data.index.isin(lfc.index[bad]).any()
+    with pytest.raises(ValueError, match="context_col"):
+        from ctxwgcna.data import prepare_frames
+        prepare_frames(data, None, max_abs=15, max_artifact_z=3)
+
+
+ARTIFACT_COLS = ["frac_masked", "artifact_z", "artifact_excluded"]
 
 def test_max_abs_masking(dominance_data, small_data):
     fc, obs = dominance_data
@@ -474,11 +527,12 @@ def test_max_abs_masking(dominance_data, small_data):
     for nan in ("raise", "skip"):
         rows, _ = detect_dominant(fc_art, obs, nan=nan, max_abs=25, verbose=False)
         assert rows.attrs["preprocessing"]["n_masked"] == art.sum()
-        pd.testing.assert_frame_equal(rows, expected)
+        pd.testing.assert_frame_equal(rows.drop(columns=ARTIFACT_COLS), expected.drop(columns=ARTIFACT_COLS))
+        assert np.allclose(rows["frac_masked"], art.sum(axis=1) / fc.shape[1])
     # filled instead when nan is a number
     rows0, _ = detect_dominant(fc_art, obs, nan=0, max_abs=25, verbose=False)
     ref0, _ = detect_dominant(fc_art.mask(art, 0.0), obs, verbose=False)
-    pd.testing.assert_frame_equal(rows0, ref0)
+    pd.testing.assert_frame_equal(rows0.drop(columns=ARTIFACT_COLS), ref0.drop(columns=ARTIFACT_COLS))
     with pytest.raises(ValueError, match="max_abs"):
         detect_dominant(fc, obs, max_abs=0, verbose=False)
     # network: masked values become 0, then the percentile clip is computed

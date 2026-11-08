@@ -170,3 +170,23 @@ data: artifacts in 96-100% of rows, the top row holds 0.27% of them; auto -> 15.
 Trade-off: injected artifacts at 0.05% of values in a 500-gene simulation hit only 24% of rows and
 are now left in (caught from 0.1%). Silent when there is no second mode; prints when it masks or when
 it finds a concentrated mode and leaves it. CLI: --max-abs auto (default) / NUMBER / none.
+
+## Artifact rows and dominance renames (2026-11-08)
+Santacruzamate A + Carfilzomib ranked 2nd of 381 by median magnitude ratio but had < 235 DEGs. Its
+rows: 25-32% of genes masked by max_abs (rank 1 of 381; median row 1.3%), only 7 of 12 cell types
+tested, noisiest remaining LFCs; only its clean row (Neuron-GABA_MGE, 1.3% masked) matched
+Carfilzomib alone (r 0.74), the others r ~0.2 with regional markers on top (EMX1, WNT8B, LHX5):
+few cells. At 4/4 thresholds all 6 extra flags had 25-32% masked. frac_masked per row is not
+bimodal (cell type explains ~64% of log variance; residual unimodal with a heavy tail), so the
+filter is an outlier rule: robust z of log10 frac_masked vs the context median, MAD pooled
+(max_artifact_z, default off). z > 3 = > 11.7x the context median: 92 rows excluded; at 3/3/0.05
+then 11/11 flagged conditions in the DEG top 30 (8 of top 10) vs 13/26 without. Absolute cutoffs
+(> 10%) mainly removed rare cell types. Cost: CHIR-124 (genuine, probably cell-depleting) loses 3
+of 7 rows but stays flagged.
+Renamed (old names still accepted with FutureWarning; old CLI flags are aliases): label_col ->
+condition_col, min_fold -> min_magnitude_ratio, min_z -> min_magnitude_z, min_gene_frac ->
+min_frac_genes_extreme, extreme_z -> gene_extreme_z, max_frac -> max_frac_flagged. Output columns
+(no aliases): label -> condition, ss -> magnitude, fold -> magnitude_ratio, robust_z ->
+magnitude_z, n_extreme / frac_extreme -> n_genes_extreme / frac_genes_extreme, summary max_fold ->
+max_magnitude_ratio etc.; new columns frac_masked, artifact_z, artifact_excluded,
+n_artifact_excluded, median_frac_masked. CLI global baseline now uses the context network's rows.

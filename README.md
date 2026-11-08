@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 41 tests, a few seconds
+python -m pytest -q                      # 43 tests, a few seconds
 python scripts/run_ctxwgcna.py --simulate --power 12 --min-module-size 20 --outdir results_demo/
 ```
 
@@ -190,7 +190,7 @@ passing an AnnData object needs nothing extra. On the command line use `--h5ad d
   |---|---|---|
   | `pearson` / `spearman` / `bicor` | run, but Pearson is distorted by the skew (an 8-fold rise counts 8×, an 8-fold drop < 1) | identical (scale-invariant) |
   | `cosine` | wrong: uncentred, so every gene "moves together" away from 0 | identical |
-  | `detect_dominant` | wrong: magnitude is distance from 0, not from 1 | identical (`fold`, `robust_z`, `frac_extreme` are ratios / z-scores) |
+  | `detect_dominant` | wrong: magnitude is distance from 0, not from 1 | identical (`magnitude_ratio`, `magnitude_z`, `frac_genes_extreme` are ratios / z-scores) |
   | `nan=0`, symmetric `clip` | wrong: 0 and ±c only mean "no change" / "equally large up or down" on the log scale | `clip="pNN"` identical; a fixed `clip=c` means log2 c vs ln c (c = 3: 8-fold vs 20-fold) |
 
   A warning is printed if `detect_dominant` (or `similarity="cosine"`) gets data with no negative
@@ -258,7 +258,7 @@ Evidence from simulation (1,000 genes, 20 systems × 300 conditions; F1 of plant
 ```python
 from ctxwgcna import detect_dominant, drop_dominant
 
-rows, summary = detect_dominant(lfc, obs, context_col="system", label_col="condition")
+rows, summary = detect_dominant(lfc, obs, context_col="system", condition_col="condition")
 print(summary.head(10))          # per condition: in how many systems it is dominant
 lfc_clean, obs_clean = drop_dominant(lfc, obs, rows)
 cw = ContextWGCNA(lfc_clean, obs_clean, context_col="system")
@@ -269,19 +269,21 @@ adata_clean = drop_dominant(adata, rows=rows)
 ```
 or with the script: `--exclude-dominant` (`--detect-dominant` only reports).
 
-**Missing values and extreme LFCs.** Three options prepare the values before scoring, applied in
-this order: `nan`, `max_abs`, `clip`. `ContextWGCNA` and `global_wgcna` take the same options
+**Missing values and extreme LFCs.** Four options prepare the values before scoring, applied in
+this order: `nan`, `max_abs`, `max_artifact_z`, `clip`. `ContextWGCNA` and `global_wgcna` take the same options
 (section 4); in `detect_dominant` they affect the scoring only, and the data you pass on is not
 changed.
 
 | Option | Values | Effect |
 |---|---|---|
 | `nan` (`--nan`) | `"raise"` (default) | error on any NaN |
-| | `"skip"` | all-NaN rows (untested combinations) are not scored (metrics NaN, never dominant, not counted in `n_contexts`); other NaN entries are ignored (sum of squares scaled up to all genes, `frac_extreme` over the observed genes) |
+| | `"skip"` | all-NaN rows (untested combinations) are not scored (metrics NaN, never dominant, not counted in `n_contexts`); other NaN entries are ignored (magnitude scaled up to all genes, `frac_genes_extreme` over the observed genes) |
 | | a number, e.g. `0` | fill NaN with it (`0` = "no change") |
 | `max_abs` (`--max-abs`) | `"auto"` (default) | cutoff from the data: the gap below a separate cluster of large \|LFC\| that occurs in most rows (see below); nothing masked if there is none |
 | | `None` (CLI: `none`) | no masking |
 | | e.g. `15` | \|LFC\| > 15 (and ±inf) are missing measurements: ignored per entry like NaN, or filled with `nan` if it is a number. They never trigger `nan="raise"`. In `ContextWGCNA` they are set to 0. |
+| `max_artifact_z` (`--max-artifact-z`) | `None` (default) | keep all rows |
+| | e.g. `3` | rows with unusually many masked genes for their context are not scored (below) |
 | `clip` (`--clip`) | `None` (default) | no clipping |
 | | `3` | clip to [−3, 3] |
 | | `(-2, 4)` (CLI: `--clip=-2,4`) | clip to [lo, hi] |
@@ -289,7 +291,7 @@ changed.
 
 ```python
 rows, summary = detect_dominant(lfc, obs, context_col="celltype", nan="skip")  # max_abs="auto"
-rows.attrs["preprocessing"]      # NaN counts, values masked, clip bounds, fractions affected
+rows.attrs["preprocessing"]      # NaN counts, values masked, rows excluded, clip bounds
 ```
 
 In a real screen (12 cell types × 381 conditions, 3.3% of values at |LFC| 20–35), masking with
@@ -312,55 +314,81 @@ so it only works if the artifact fraction is known in advance. Check the printed
 `ctxwgcna.data.auto_max_abs(values, details=True)` returns it (with the mode, the fraction of rows and
 the reason when nothing is masked) without running anything else.
 
-Clipping keeps a few unstable values (e.g. LFCs capped at ±10) from dominating the sum of squares, so
-`fold` reflects how many genes change rather than how many hit the cap. With `nan="skip"`,
+**Rows resting on too few cells (`max_artifact_z`).** The share of a row's genes masked by `max_abs`
+(`frac_masked` in `rows`) is a proxy for how few cells the row's LFCs rest on: zero counts in one
+group are what produce the artifacts. Such rows are noisy, and noise inflates their magnitude. In
+the screen above, `frac_masked` correlated with `magnitude_ratio` (Spearman 0.43 over rows), and one
+combination with 25–32% of its genes masked in six cell types (the median row: 1.3%) ranked second
+of 381 conditions by median magnitude, with few DEGs; its top genes there were regional markers
+(EMX1, WNT8B, LHX5), not its drug response. `artifact_z` measures how unusual a row's `frac_masked`
+is: a robust z of log10(`frac_masked`) after subtracting its context's median (contexts differ:
+rare cell types have ~50× more masked genes than abundant ones), with the spread pooled over all
+contexts. With `max_artifact_z=3`, rows above it are not scored (`artifact_excluded`; metrics NaN,
+never dominant). `frac_masked` has no clear second mode, so 3 is an outlier rule, not a gap. In the
+screen it excluded 92 of 4,417 rows (> 11.7× their context median), which let the thresholds be
+relaxed: at `min_magnitude_ratio=3, min_magnitude_z=3, min_frac_genes_extreme=0.05`, all 11 flagged
+conditions were in the top 30 by DEG count (8 of the top 10), against 13 of 26 without exclusion.
+The cost: a genuine but cell-depleting condition loses rows too (CHIR-124 kept 4 of its 7). Pass the
+same `max_artifact_z` to `ContextWGCNA` to leave the rows out of the network; `drop_dominant` keeps
+them, since they are not dominant.
+
+Clipping keeps a few unstable values (e.g. LFCs capped at ±10) from dominating the magnitude, so
+`magnitude_ratio` reflects how many genes change rather than how many hit the cap. With `nan="skip"`,
 `drop_dominant` keeps the unscored all-NaN rows; `ContextWGCNA(..., nan="skip")` then drops them.
-On the command line `--nan` / `--max-abs` / `--clip` apply to both steps; `--dominant-nan` /
-`--dominant-max-abs` / `--dominant-clip` override them for the dominance step only. A percentile clip is computed separately in each step,
+On the command line `--nan` / `--max-abs` / `--max-artifact-z` / `--clip` apply to both steps;
+`--dominant-nan` / `--dominant-max-abs` / `--dominant-max-artifact-z` / `--dominant-clip` override them for the dominance step only. A percentile clip is computed separately in each step,
 so after removing dominant rows the network's `p95` cutoff can be slightly lower.
 
 **Rule.** Each LFC profile (one condition in one system) is compared with the other profiles of the
 **same system**. So a condition can be dominant in some systems only, and only those rows are removed;
 systems may then have different numbers of conditions, which the method handles. A profile is
-flagged only if it is **both**:
+flagged only if it passes all three criteria. A profile's **magnitude** is its sum of squared LFC
+over all genes (how much changes in total); the names below build on that word.
 
-| Criterion | Parameter (default) | Meaning |
-|---|---|---|
-| larger | `min_fold` (5) | sum of squared LFC over genes ≥ 5 × the system's median |
-| unusual | `min_z` (4) | robust outlier among the system's profiles (log scale, median/MAD), so systems with naturally wide spreads don't get many flags |
-| broad | `min_gene_frac` (0.10) | ≥ 10% of genes are extreme in it (\|robust z\| ≥ `extreme_z` = 5 for that gene within the system) |
+| Criterion | Parameter (default) | CLI | Meaning |
+|---|---|---|---|
+| larger | `min_magnitude_ratio` (5) | `--dominant-min-magnitude-ratio` | magnitude ≥ 5 × the median magnitude of the system's profiles |
+| unusual | `min_magnitude_z` (4) | `--dominant-min-magnitude-z` | robust outlier among the system's profiles (log2 of the ratio, median/MAD), so systems with naturally wide spreads don't get many flags |
+| broad | `min_frac_genes_extreme` (0.10) | `--dominant-min-frac-genes-extreme` | ≥ 10% of its genes are extreme: their LFC is ≥ `gene_extreme_z` (5) robust SDs from that gene's median LFC in the system |
+
+The old names (`min_fold`, `min_z`, `min_gene_frac`, `extreme_z`, `max_frac`, `label_col`, and the
+matching `--dominant-*` flags) still work, with a warning.
 
 Breadth is what separates a harmful profile from a real few-condition programme. In simulation, a
 programme's strongest profiles reached 7× the median magnitude but moved only 6% of genes (kept),
 while dominant conditions moved 22–60% of genes (flagged).
 
-**Several dominant conditions are allowed, but they must stay few.** `max_frac` (default 0.05)
+**Several dominant conditions are allowed, but they must stay few.** `max_frac_flagged` (default 0.05)
 caps the flagged fraction per system at 5% of its profiles. The median/MAD reference is only valid
 when dominant profiles are a small minority. If more profiles pass, the strongest 5% are
 flagged, the rest are marked `candidate`, and a **warning** is printed. "Dominance" that widespread
 is a continuum, not a few outliers, and removing rows is then the wrong tool: inspect the table,
-raise `min_fold`, or reconsider.
+raise `min_magnitude_ratio`, or reconsider.
 
 Outputs (the script writes them to `dominance_rows.csv` and `dominance_summary.csv`):
 
 | Table | Column | Meaning |
 |---|---|---|
-| `rows` (one per profile) | `ss` | sum of squared LFC over all genes: the profile's size |
-| | `fold` | `ss` / median `ss` of the context's profiles (5 = five times a typical profile) |
-| | `robust_z` | how unusual `log2(fold)` is within the context, in robust SDs |
-| | `n_extreme`, `frac_extreme` | number / fraction of genes whose LFC here is \|robust z\| ≥ `extreme_z` away from that gene's typical LFC in the context |
-| | `candidate`, `dominant` | passes all three criteria; flagged after the `max_frac` cap |
-| `summary` (one per condition) | `n_contexts` | contexts in which the condition has a profile (**not** where it is dominant) |
+| `rows` (one per profile) | `context`, `condition` | where it belongs (`condition` from `condition_col`) |
+| | `magnitude` | sum of squared LFC over all genes: the profile's size |
+| | `magnitude_ratio` | `magnitude` / median `magnitude` of the context's profiles (5 = five times a typical profile) |
+| | `magnitude_z` | how unusual `log2(magnitude_ratio)` is within the context, in robust SDs |
+| | `n_genes_extreme`, `frac_genes_extreme` | number / fraction of genes whose LFC here is ≥ `gene_extreme_z` robust SDs from that gene's median LFC in the context |
+| | `candidate`, `dominant` | passes all three criteria; flagged after the `max_frac_flagged` cap |
+| | `frac_masked`, `artifact_z`, `artifact_excluded` | share of genes masked by `max_abs`; how unusual that is for the context; not scored because `artifact_z` > `max_artifact_z` |
+| `summary` (one per condition) | `n_contexts` | contexts in which the condition has a scored profile (**not** where it is dominant) |
 | | `n_dominant`, `frac_dominant` | contexts in which it is flagged |
-| | `n_broad` | contexts in which it passes the breadth criterion (`frac_extreme` ≥ `min_gene_frac`), flagged or not |
-| | `max_fold`, `median_fold` | its largest / median `fold` across contexts |
-| | `max_frac_extreme`, `median_frac_extreme`, `mean_frac_extreme`, `min_frac_extreme` | the same for `frac_extreme`; a high minimum means broad in every context |
+| | `n_broad` | contexts in which it passes the breadth criterion (`frac_genes_extreme` ≥ `min_frac_genes_extreme`), flagged or not |
+| | `n_artifact_excluded` | contexts in which its profile was excluded by `max_artifact_z` |
+| | `max_magnitude_ratio`, `median_magnitude_ratio` | its largest / median `magnitude_ratio` across contexts |
+| | `max_frac_genes_extreme`, `median_…`, `mean_…`, `min_frac_genes_extreme` | the same for `frac_genes_extreme`; a high minimum means broad in every context |
+| | `median_frac_masked` | median `frac_masked` of its profiles: high = few cells, less reliable |
 
-`fold` measures squared magnitude, not the number of changed genes, so it does not rank conditions
+`magnitude_ratio` measures squared magnitude, not the number of changed genes, so it does not rank conditions
 the same way as their DEG counts do: 100 genes at LFC 1 add as much as one gene at LFC 10.
-`frac_extreme` is closer to "how many genes respond". Loosening the thresholds far below the
-defaults (e.g. `extreme_z=1`, which a third of all genes pass in an ordinary profile) turns the
-test into a ranking: `max_frac` then simply flags the largest profiles of every context.
+`frac_genes_extreme` is closer to "how many genes respond". Loosening the thresholds far below the
+defaults (e.g. `gene_extreme_z=1`, which a third of all genes pass in an ordinary profile) turns the
+test into a ranking: `max_frac_flagged` then simply flags the largest profiles of every context.
 
 **Analysing the flagged conditions separately.** One condition is a single data point per system,
 so it has no correlation structure of its own. Take its responder genes (`|LFC|` large, ideally
@@ -488,6 +516,7 @@ The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_b
 | `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
 | `nan` | `"raise"` | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
 | `max_abs` | `"auto"` | Treat \|value\| > `max_abs` as missing (GLM LFCs of ~30 from zero counts): `"auto"` takes the cutoff from a separate, scattered cluster of large values (none: nothing masked), a number (e.g. 15) fixes it, `None` turns it off; set to 0 (or to `nan` if it is a number), before clipping. |
+| `max_artifact_z` | `None` | Leave out rows with unusually many masked genes for their context (`artifact_z` > this, e.g. 3; see section 3). |
 | `clip` | `None` | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. `.data` holds the clipped data, `.preprocessing` what was done. |
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
@@ -604,7 +633,7 @@ the other submodule members, over the submodule's contexts; a membership strengt
 
 1. Check for dominant conditions first: run with `--detect-dominant` and read
    `dominance_summary.csv`. If a few conditions are flagged (in some or all systems), use
-   `--exclude-dominant` from then on. If the cap warning appears, look at the `fold` distribution
+   `--exclude-dominant` from then on. If the cap warning appears, look at the `magnitude_ratio` distribution
    before removing anything.
 2. Run with defaults plus `--global-baseline`. Check how many modules are found and their context
    profiles. Global modules should look similar in both runs; local modules should appear only in

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+MAD_TO_SD = 1.4826  # MAD * 1.4826 estimates the SD of normally distributed data
+
 
 @dataclass
 class ContextBlock:
@@ -242,14 +244,18 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
         info["max_abs"], info["max_abs_rule"] = max_abs, "auto"
         info["max_abs_mode"], info["max_abs_row_frac"] = found["mode"], found["row_frac"]
         info["max_abs_reason"] = found["reason"]
+    observed = ~np.isnan(X)
+    n_observed = observed.sum(axis=1)  # per row, before masking
+    info["row_frac_masked"] = np.where(n_observed > 0, 0.0, np.nan)
     if max_abs is not None:
         if not max_abs > 0:
             raise ValueError("max_abs must be > 0")
         with np.errstate(invalid="ignore"):
             masked = np.abs(X) > max_abs  # NaN compares False
         info["n_masked"] = int(masked.sum())
-        observed = ~np.isnan(X)
         info["frac_masked"] = float(masked[observed].mean()) if observed.any() else 0.0
+        with np.errstate(invalid="ignore", divide="ignore"):
+            info["row_frac_masked"] = masked.sum(axis=1) / n_observed  # NaN for rows without data
         X = np.where(masked, np.nan if masked_as == "nan" else float(masked_as), X)
         if masked_as == "nan":
             scored &= ~np.isnan(X).all(axis=1)  # a row masked completely has nothing left to score
@@ -266,6 +272,52 @@ def prepare_values(X, index, nan="raise", clip=None, max_abs=None, masked_as="na
     return X, scored, info
 
 
+def artifact_row_z(frac_masked, contexts, n_genes):
+    """How unusually many of a row's genes were masked by max_abs, compared with its context.
+
+    z = robust z of log10(fraction masked) after subtracting the median of the row's context (cell
+    types differ ~50x in their typical fraction, e.g. rare cell types have more zero-count genes). The
+    spread (MAD) is pooled over all contexts. Fractions are floored at one gene (1 / n_genes), so rows
+    with nothing masked are comparable. Rows without data get NaN; z = 0 everywhere if nothing varies.
+    A high z marks a row whose LFCs rest on very few cells: noisy and inflated in magnitude.
+    """
+    return _artifact_z(frac_masked, contexts, n_genes)[0]
+
+
+def _artifact_z(frac_masked, contexts, n_genes):
+    """(z, centre, mad) of artifact_row_z, on the log10 scale."""
+    f = pd.Series(np.asarray(frac_masked, dtype=np.float64))
+    lg = np.log10(f.clip(lower=1.0 / n_genes))
+    res = lg - lg.groupby(np.asarray(contexts)).transform("median").to_numpy()
+    if res.isna().all():
+        return res.to_numpy(), 0.0, 0.0
+    centre = float(np.nanmedian(res))
+    mad = float(MAD_TO_SD * np.nanmedian(np.abs(res - centre)))
+    if not mad > 0:
+        return np.where(f.isna(), np.nan, 0.0), centre, 0.0
+    return ((res - centre) / mad).to_numpy(), centre, mad
+
+
+def flag_artifact_rows(info, contexts, n_genes, max_artifact_z):
+    """artifact_row_z for every row, and which rows exceed max_artifact_z (None: none excluded).
+
+    Records the count, the threshold and the equivalent ratio to the context median in info.
+    Returns (z, excluded) as arrays.
+    """
+    z, centre, mad = _artifact_z(info["row_frac_masked"], contexts, n_genes)
+    info["max_artifact_z"] = max_artifact_z
+    if max_artifact_z is None:
+        excluded = np.zeros(len(z), dtype=bool)
+    else:
+        if info["max_abs"] is None:
+            print("Note: max_artifact_z has no effect without masking (max_abs found nothing to mask).")
+        with np.errstate(invalid="ignore"):
+            excluded = z > max_artifact_z  # NaN (rows without data) compares False
+        info["artifact_cutoff_ratio"] = float(10 ** (centre + max_artifact_z * mad))
+    info["n_artifact_rows"] = int(excluded.sum())
+    return z, excluded
+
+
 def report_preparation(info, nan_message):
     """Print what prepare_values did (NaN rule, masking, clipping); nan_message describes the NaN rule."""
     if info["n_nan_rows"] and nan_message:
@@ -278,6 +330,10 @@ def report_preparation(info, nan_message):
               f"({100 * info['frac_masked']:.2f}%), treated as missing.")
     elif auto and info["max_abs_mode"] is not None:  # a mode was found but not masked: say why
         print(f"max_abs='auto': {info['max_abs_reason']}; nothing masked.")
+    if info.get("n_artifact_rows"):
+        print(f"Excluded {info['n_artifact_rows']} rows with unusually many masked genes for their context "
+              f"(artifact_z > {info['max_artifact_z']:g}, i.e. > {info['artifact_cutoff_ratio']:.3g}x the "
+              "context median fraction): too few cells for reliable LFCs.")
     if info["clip_bounds"] is not None:
         print(f"Clipped to {info['clip_desc']}: {100 * info['frac_clipped']:.2f}% of values.")
 
@@ -295,22 +351,34 @@ def warn_if_linear_fc(X, what):
               "assumes log FC (0 = no change); pass log2(FC) instead.")
 
 
-def prepare_frames(data, obs, nan="raise", clip=None, max_abs=None, verbose=True):
+def prepare_frames(data, obs, nan="raise", clip=None, max_abs=None, verbose=True, context_col=None,
+                   max_artifact_z=None):
     """NaN rule, masking and clipping for the network: returns (data, obs, info), all-NaN rows dropped.
 
     Unlike detect_dominant, nan='skip' cannot ignore single NaN entries here: correlations would need
     pairwise-complete observations (a different n per gene pair). Rows that are only partly NaN
     therefore raise an error under 'skip'; fill them (nan=0) or drop the affected genes. Values masked
     by max_abs are filled with the nan value if it is a number, else with 0 ("no usable change").
+    max_artifact_z (needs obs[context_col]) drops rows with unusually many masked genes for their
+    context, as in detect_dominant.
     """
     masked_as = nan if not isinstance(nan, str) else 0.0
     X, scored, info = prepare_values(data.to_numpy(dtype=np.float64), data.index, nan, clip,
                                      max_abs=max_abs, masked_as=masked_as)
+    if max_artifact_z is not None:
+        if obs is None or context_col is None:
+            raise ValueError("max_artifact_z needs obs and context_col (artifacts are judged per context)")
+        _, excluded = flag_artifact_rows(info, obs.loc[data.index, context_col].to_numpy(), data.shape[1],
+                                         max_artifact_z)
+        scored = scored & ~excluded
+    else:
+        info["n_artifact_rows"] = 0
     if nan == "skip" and np.isnan(X[scored]).any():
         n_part = info["n_nan_rows"] - info["n_all_nan_rows"]
         raise ValueError(f"{n_part} rows are partly NaN; nan='skip' only drops rows that are entirely NaN. "
                          "Fill them (nan=0, if 'not measured' means 'no change') or drop the affected genes.")
-    if info["n_nan_rows"] == 0 and info["n_masked"] == 0 and info["clip_bounds"] is None:
+    if (info["n_nan_rows"] == 0 and info["n_masked"] == 0 and info["clip_bounds"] is None
+            and info["n_artifact_rows"] == 0):
         if verbose and info["max_abs_mode"] is not None:
             report_preparation(info, "")
         return data, obs, info  # nothing changed: keep the caller's frame as is

@@ -47,7 +47,10 @@ class ContextWGCNA:
         when one group has zero counts): 'auto' (default; cutoff from the data, nothing masked if
         there is no separate mode of large values, see detect_dominant), a number (e.g. 15), or None
         (no masking); they are set to 0 (or to nan if it is a number),
-        before clipping. .data / .obs hold the data after these steps; .preprocessing records them.
+        before clipping.
+    :param max_artifact_z: leave out rows with unusually many masked genes for their context
+        (artifact_z > max_artifact_z, as in detect_dominant; e.g. 3). None (default): keep all.
+    .data / .obs hold the data after these steps; .preprocessing records them.
     See README.md section 4 for all parameters.
     """
 
@@ -55,12 +58,13 @@ class ContextWGCNA:
                  network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
                  tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
                  store_context_t="auto", store_max_mb=2048, layer=None, genes=None, nan="raise",
-                 clip=None, max_abs="auto"):
+                 clip=None, max_abs="auto", max_artifact_z=None):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
         data, obs = as_frames(data, obs, layer=layer, genes=genes)
-        data, obs, self.preprocessing = prepare_frames(data, obs, nan=nan, clip=clip, max_abs=max_abs)
+        data, obs, self.preprocessing = prepare_frames(data, obs, nan=nan, clip=clip, max_abs=max_abs,
+                                                       context_col=context_col, max_artifact_z=max_artifact_z)
         if similarity == "cosine":  # uncentred: needs 0 = "no change"
             warn_if_linear_fc(data.to_numpy(dtype=np.float64), "similarity='cosine'")
         self.data, self.obs, self.layer = data, obs, layer
