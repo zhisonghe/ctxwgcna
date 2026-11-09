@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 44 tests, a few seconds
+python -m pytest -q                      # 45 tests, a few seconds
 ```
 
 Then a demo on simulated data (a few seconds):
@@ -284,6 +284,31 @@ for p in (8, 12, 16):
    ContextWGCNA(lfc_null, obs).run(power=12)
    ```
 4. **Sensitivity:** vary `top_n` (2 vs 3) and `t_thr` / `jaccard_cut` in the split.
+
+
+### Standard WGCNA
+
+Two ways, which give identical modules:
+
+```python
+# 1. one function: pooled correlation over all rows, standard TOM, dynamic tree cut
+modules, power = global_wgcna(lfc, power=12, min_module_size=30)   # power=None: scale-free pick
+
+# 2. ContextWGCNA with a single context: the same network, with the step-by-step methods above
+cw_std = ContextWGCNA(lfc, obs.assign(all="all"), context_col="all",
+                      top_n=1, calibrate="none", tom_mode="standard")
+cw_std.pick_power(); cw_std.build_network(power=12)
+modules = cw_std.find_modules(min_module_size=30)
+```
+
+With one context, the "best n contexts" is just the ordinary correlation, there is no selection
+to calibrate, and `tom_mode="standard"` is the plain WGCNA TOM, so the result equals
+`global_wgcna` (checked in the tests). Use `contexts=[...]` with `context_col="system"` to run standard
+WGCNA within one system. `similarity`, `network_type`, `deep_split`, `nan`, `max_abs` and `clip`
+work as usual. Compared with the R package, both skip module merging by eigengene correlation and
+the PAM stage ([Known limitations](#10-known-limitations)); the tree cut is the same
+(`dynamicTreeCut`). `split_modules()` on a single context gives at most one submodule per module: its core of genes
+with enough significant partners (not needed for standard WGCNA).
 
 ---
 

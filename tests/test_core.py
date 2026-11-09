@@ -766,3 +766,14 @@ def test_steps_clear_only_downstream_results():
     assert cw.tom is not tom and cw.support.top_n == 3
     cw.network_type = "unsigned"                    # selection follows network_type
     assert cw.selection == "absolute"
+
+
+def test_single_context_equals_standard_wgcna():
+    fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
+    pooled, _ = global_wgcna(fc, power=12, min_module_size=20)
+    cw = ContextWGCNA(fc, obs.assign(all="all"), context_col="all", top_n=1, calibrate="none",
+                      tom_mode="standard")
+    assert (cw.run(power=12, min_module_size=20) == pooled).all()
+    one = ContextWGCNA(fc, obs, contexts=["sys0"], top_n=1, calibrate="none", tom_mode="standard")
+    sys0, _ = global_wgcna(fc[obs["system"] == "sys0"], power=12, min_module_size=20)
+    assert (one.run(power=12, min_module_size=20) == sys0).all()
