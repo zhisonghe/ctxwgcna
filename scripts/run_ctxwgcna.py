@@ -23,7 +23,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from ctxwgcna import ContextWGCNA, detect_dominant, drop_dominant, global_wgcna
+from ctxwgcna import ContextWGCNA, detect_dominant, drop_dominant
 from ctxwgcna.data import as_frames
 
 
@@ -266,10 +266,14 @@ def main(argv=None):
     # --- optional extras ---
     if args.global_baseline:
         # same rows as the context network (all-NaN and artifact-excluded rows left out)
-        glob, gp = global_wgcna(data.loc[cw.data.index], similarity=args.similarity, network_type=args.network_type,
-                                power=args.power, min_module_size=args.min_module_size,
-                                deep_split=args.deep_split, nan=_nan_option(args.nan),
-                                clip=_clip_option(args.clip), max_abs=_max_abs_value(args.max_abs))
+        std = ContextWGCNA(data.loc[cw.data.index], similarity=args.similarity, network_type=args.network_type,
+                           nan=_nan_option(args.nan), clip=_clip_option(args.clip),
+                           max_abs=_max_abs_value(args.max_abs))  # no context_col: standard WGCNA
+        if args.power is None:
+            std.pick_power(r2_cut=args.r2_cut)
+        std.build_network(args.power)
+        glob = std.find_modules(min_module_size=args.min_module_size, deep_split=args.deep_split)
+        gp = std.power
         glob.rename("global_module").to_csv(out("global_modules.csv"))
         print(f"global baseline (power {gp}):", glob.value_counts().to_dict())
     if args.save_matrices:

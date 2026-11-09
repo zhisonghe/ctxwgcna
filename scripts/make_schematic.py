@@ -19,7 +19,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 from matplotlib.patches import FancyArrowPatch, Rectangle  # noqa: E402
 
-from ctxwgcna import ContextWGCNA, global_wgcna, similarity_matrix  # noqa: E402
+from ctxwgcna import ContextWGCNA, similarity_matrix  # noqa: E402
 from ctxwgcna.simulate import simulate_lfc  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "docs")
@@ -53,10 +53,10 @@ def recovery(truth, modules):
 def run_example():
     """Simulate, run ContextWGCNA and the pooled baseline, and collect what the panels need."""
     lfc, obs, truth = simulate_lfc(n_genes=360, n_systems=N_SYSTEMS, n_conditions=100, seed=0)
-    cw = ContextWGCNA(lfc, obs)
+    cw = ContextWGCNA(lfc, obs, context_col="system")
     cw.run(power=POWER, min_module_size=20)
     cw.split_modules()
-    pooled_modules, _ = global_wgcna(lfc, power=POWER, min_module_size=20)
+    pooled_modules = ContextWGCNA(lfc).run(power=POWER, min_module_size=20)  # standard WGCNA
     pooled_r = similarity_matrix(lfc.to_numpy())
     i, j = PAIR
     module_of_q = cw.modules.iloc[i]

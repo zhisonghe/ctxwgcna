@@ -136,9 +136,17 @@ def _majority(ct, t):
     return row.idxmax(), row.max() / ct.loc[t].sum()
 
 
+def pooled_wgcna(fc, power, min_module_size):
+    """Reference standard WGCNA from the low-level functions (pooled correlation, standard TOM)."""
+    from ctxwgcna import similarity_matrix
+    from ctxwgcna.modules import detect_modules
+    adj = adjacency_from_r(similarity_matrix(fc.to_numpy(), "pearson"), power, "signed")
+    return detect_modules(context_tom(adj, mode="standard"), fc.columns, min_module_size=min_module_size)[0]
+
+
 def test_simulation_recovers_local_modules_where_global_fails():
     fc, obs, truth = simulate_lfc(seed=0)
-    glob, _ = global_wgcna(fc, power=12, min_module_size=20)
+    glob = ContextWGCNA(fc).run(power=12, min_module_size=20)  # standard WGCNA
     cw = ContextWGCNA(fc, obs, context_col="system", top_n=2, tom_mode="matched")
     mods = cw.run(power=12, min_module_size=20)
     assert adjusted_rand_score(truth, mods) > 0.7
@@ -685,7 +693,7 @@ def test_anndata_input_matches_dataframe(adata_example):
     sub = ContextWGCNA(ad, layer="log2fc", genes="keep", context_col="system")
     assert list(sub.genes) == list(fc.columns[:150])
     assert list(ContextWGCNA(ad, layer="log2fc", genes=["g0003", "g0001"]).genes) == ["g0003", "g0001"]
-    labels, _ = global_wgcna(ad, layer="log2fc", power=12, min_module_size=20)
+    labels = ContextWGCNA(ad, layer="log2fc").run(power=12, min_module_size=20)
     assert list(labels.index) == list(fc.columns)
 
 
@@ -771,18 +779,18 @@ def test_steps_clear_only_downstream_results():
 
 def test_single_context_equals_standard_wgcna():
     fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
-    pooled, _ = global_wgcna(fc, power=12, min_module_size=20)
+    pooled = pooled_wgcna(fc, 12, 20)
     cw = ContextWGCNA(fc, obs.assign(all="all"), context_col="all", top_n=1, calibrate="none",
                       tom_mode="standard")
     assert (cw.run(power=12, min_module_size=20) == pooled).all()
     one = ContextWGCNA(fc, obs, contexts=["sys0"], top_n=1, calibrate="none", tom_mode="standard", context_col="system")
-    sys0, _ = global_wgcna(fc[obs["system"] == "sys0"], power=12, min_module_size=20)
+    sys0 = pooled_wgcna(fc[obs["system"] == "sys0"], 12, 20)
     assert (one.run(power=12, min_module_size=20) == sys0).all()
 
 
 def test_context_col_none_is_standard_wgcna():
     fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
-    pooled, _ = global_wgcna(fc, power=12, min_module_size=20)
+    pooled = pooled_wgcna(fc, 12, 20)
     cw = ContextWGCNA(fc)                                   # default: no obs needed
     assert (cw.top_n, cw.calibrate, cw.tom_mode) == (1, "none", "standard")
     assert [b.name for b in cw.blocks] == ["all"] and cw.context_col is None
@@ -795,3 +803,10 @@ def test_context_col_none_is_standard_wgcna():
         ContextWGCNA(fc, obs, top_n=1, calibrate="none", tom_mode="standard")
     ctx = ContextWGCNA(fc, obs, context_col="system")       # context-aware defaults
     assert (ctx.top_n, ctx.calibrate, ctx.tom_mode) == (3, "analytic", "matched")
+
+
+def test_global_wgcna_deprecated():
+    fc, _, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
+    with pytest.warns(FutureWarning, match="global_wgcna is deprecated"):
+        labels, power = global_wgcna(fc, power=12, min_module_size=20)
+    assert power == 12 and (labels == pooled_wgcna(fc, 12, 20)).all()

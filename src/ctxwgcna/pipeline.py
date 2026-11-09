@@ -31,7 +31,7 @@ class ContextWGCNA:
 
     context_col=None (the default) runs STANDARD WGCNA: all rows form one context, with top_n=1,
     calibrate='none' and tom_mode='standard' (other values for these are overridden with a warning).
-    The result equals global_wgcna(). Pass context_col (e.g. 'system') for the context-aware method.
+    Pass context_col (e.g. 'system') for the context-aware method.
 
     Typical use:  cw = ContextWGCNA(data, obs, context_col="system"); cw.run(); cw.split_modules()
              or:  cw = ContextWGCNA(adata, layer="log2fc", genes="highly_variable")
@@ -322,18 +322,16 @@ class ContextWGCNA:
 def global_wgcna(data, similarity="pearson", network_type="signed", power=None, powers=None,
                  min_module_size=30, deep_split=2, r2_cut=0.85, mean_cut=100, layer=None, genes=None,
                  nan="raise", clip=None, max_abs="auto"):
-    """Baseline: standard WGCNA with one similarity over all observations pooled + standard TOM.
+    """Deprecated: use ContextWGCNA(data) (context_col=None runs standard WGCNA) and its steps.
 
-    data is a DataFrame (observations x genes) or AnnData; layer, genes, nan, clip and max_abs work as
-    in ContextWGCNA. Returns (module labels, power used).
+    Returns (module labels, power used), as ContextWGCNA(data, ...).run(power) would.
     """
-    data, _ = as_frames(data, None, layer=layer, genes=genes)
-    data, _, _ = prepare_frames(data, None, nan=nan, clip=clip, max_abs=max_abs, verbose=False)
-    r = similarity_matrix(data.to_numpy(), similarity)
+    warnings.warn("global_wgcna is deprecated and will be removed: ContextWGCNA(data) without "
+                  "context_col runs the same standard WGCNA (cw.run(power=...) returns the modules, "
+                  "cw.power the power).", FutureWarning, stacklevel=2)
+    cw = ContextWGCNA(data, similarity=similarity, network_type=network_type, layer=layer, genes=genes,
+                      nan=nan, clip=clip, max_abs=max_abs)
     if power is None:
-        sft = _net.scale_free_table(r, _net.DEFAULT_POWERS if powers is None else powers, network_type)
-        power, _ = _net.pick_power(sft, r2_cut, mean_cut)
-    adj = _net.adjacency_from_r(r, power, network_type)
-    tom = _net.context_tom(adj, mode="standard")
-    labels, _ = _mod.detect_modules(tom, data.columns, min_module_size=min_module_size, deep_split=deep_split)
-    return labels, power
+        cw.pick_power(powers=powers, r2_cut=r2_cut, mean_cut=mean_cut)
+    cw.build_network(power)
+    return cw.find_modules(min_module_size=min_module_size, deep_split=deep_split), cw.power

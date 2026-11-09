@@ -210,3 +210,7 @@ matched with a context_col). Conflicting values, contexts or support_min_t are o
 UserWarning. obs is optional for a DataFrame then. Equals global_wgcna exactly (test). CLI follows:
 --context-col default none, --top-n/--calibrate/--tom-mode default by mode; dominance flags require
 --context-col. Simulation demo: standard ARI 0.13 vs context-aware 0.98.
+global_wgcna deprecated (FutureWarning; now a wrapper around ContextWGCNA(data)). CLI
+--global-baseline and make_schematic.py use ContextWGCNA without context_col (make_schematic also
+needed context_col="system" after the default change). Tests compare standard mode with a reference
+built from the low-level functions (pooled_wgcna helper).

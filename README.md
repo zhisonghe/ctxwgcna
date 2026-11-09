@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 46 tests, a few seconds
+python -m pytest -q                      # 47 tests, a few seconds
 ```
 
 Then a demo on simulated data (a few seconds):
@@ -154,7 +154,7 @@ index (section 3).
 
 ```python
 import pandas as pd
-from ctxwgcna import ContextWGCNA, detect_dominant, drop_dominant, global_wgcna
+from ctxwgcna import ContextWGCNA, detect_dominant, drop_dominant
 
 lfc = pd.read_csv("lfc.csv", index_col=0)   # rows "sysA|cond001", ...; columns = genes
 obs = pd.read_csv("obs.csv", index_col=0)   # same index; columns "system", "condition"
@@ -229,11 +229,11 @@ cw.module_context_coherence()            # direct per-context check
 cw.context_eigengenes("M3", contexts=["sysA", "sysB"])
 ```
 
-**8. Compare with standard WGCNA** on the pooled data: global modules should appear in both, local
-ones only in the context run.
+**8. Compare with standard WGCNA** on the pooled data ([Standard WGCNA](#standard-wgcna)): global
+modules should appear in both, local ones only in the context run.
 
 ```python
-glob_modules, glob_power = global_wgcna(lfc, power=12, min_module_size=30)
+glob_modules = ContextWGCNA(lfc).run(power=12, min_module_size=30)   # no context_col
 pd.crosstab(modules, glob_modules)
 ```
 
@@ -297,27 +297,24 @@ for p in (8, 12, 16):
 context information used). Pass your context column, e.g. `context_col="system"`, to run the
 context-aware method.**
 
-Two ways, which give identical modules:
-
 ```python
-# 1. ContextWGCNA without context_col: standard WGCNA with the step-by-step methods above
-cw_std = ContextWGCNA(lfc)               # obs is not needed
+cw_std = ContextWGCNA(lfc)               # no context_col; obs is not needed
 cw_std.pick_power(); cw_std.build_network(power=12)
 modules = cw_std.find_modules(min_module_size=30)
 
-# 2. one function: pooled correlation over all rows, standard TOM, dynamic tree cut
-modules, power = global_wgcna(lfc, power=12, min_module_size=30)   # power=None: scale-free pick
+modules = ContextWGCNA(lfc).run(power=12, min_module_size=30)   # the same in one call
 ```
 
 Without `context_col`, all rows form a single context named `"all"`, and `top_n=1`,
 `calibrate="none"` and `tom_mode="standard"` are set for you: with one context the "best n
 contexts" is just the ordinary correlation, there is no selection to calibrate, and the standard
 TOM is the plain WGCNA TOM. Other values passed for these (or `contexts`, `support_min_t`) are
-overridden with a warning. The result equals `global_wgcna` (checked in the tests). To run standard
+overridden with a warning. The tests check that the modules equal a pooled-correlation WGCNA built
+from the low-level functions. To run standard
 WGCNA within one system, pass `context_col="system", contexts=["sysA"], top_n=1,
 calibrate="none", tom_mode="standard"`. `similarity`, `network_type`, `deep_split`, `nan`, `max_abs` and `clip`
-work as usual. Compared with the R package, both skip module merging by eigengene correlation and
-the PAM stage ([Known limitations](#10-known-limitations)); the tree cut is the same
+work as usual. Compared with the R package, module merging by eigengene correlation and
+the PAM stage are skipped ([Known limitations](#10-known-limitations)); the tree cut is the same
 (`dynamicTreeCut`). `split_modules()` on a single context gives at most one submodule per module: its core of genes
 with enough significant partners (not needed for standard WGCNA).
 
@@ -330,7 +327,7 @@ index**, either as two pandas tables or as one AnnData object (see [AnnData inpu
 The method was designed for log fold-change (**LFC**: log2 or ln, 0 = no change; not linear FC)
 data and the examples below use LFC, but any samples × genes matrix works, as in standard WGCNA (see
 [Using expression data instead of LFC](#using-expression-data-instead-of-lfc)). So the input
-argument is called `data` in `ContextWGCNA`, `global_wgcna` and `drop_dominant`, and `lfc` only in
+argument is called `data` in `ContextWGCNA` and `drop_dominant`, and `lfc` only in
 `detect_dominant`, which needs LFC. The examples name the matrix `lfc`.
 
 **Data matrix** (here `lfc`) — rows = observations, columns = genes.
@@ -353,7 +350,7 @@ has genes as rows, transpose it (`lfc.T`).
 
 ### AnnData input
 An AnnData object can be passed directly wherever the data matrix is expected (`ContextWGCNA`,
-`global_wgcna`, `detect_dominant`, `drop_dominant`). Its observations × genes matrix is the data, and `adata.obs`
+`detect_dominant`, `drop_dominant`). Its observations × genes matrix is the data, and `adata.obs`
 is the observation table, so `obs` can be left out.
 
 ```python
@@ -417,7 +414,7 @@ passing an AnnData object needs nothing extra.
 
 ### Missing values and implausible LFCs
 Four options prepare the values, applied in this order: `nan`, `max_abs`, `max_artifact_z`, `clip`.
-`ContextWGCNA` and `detect_dominant` take all four, `global_wgcna` all but `max_artifact_z`. Pass
+`ContextWGCNA` and `detect_dominant` take all four. Pass
 the same values to both steps. In `detect_dominant` they affect the scoring only, and the data you
 pass on is not changed; in `ContextWGCNA`, `.data` holds the prepared values and `.preprocessing`
 records what was done. Several examples below refer to dominance detection (section 4), where these
@@ -636,7 +633,6 @@ them.
 | [`split_modules(t_thr, ...)`](#56-split_modules) | `t_thr`, `min_size`, `min_partners`, `jaccard_cut`, `min_context_frac`, `dedup_jaccard` | `selection` | `.submodules`, `.memberships` |
 | [`run(power, min_module_size, deep_split)`](#57-run) | as in the three steps it runs | | |
 | [interpretation methods](#58-interpretation-methods) | see 5.8 | | |
-| [`global_wgcna(data, ...)`](#59-global_wgcna) | a separate function, see 5.9 | | |
 
 ### 5.1 The constructor
 
@@ -818,19 +814,10 @@ split them: call `split_modules()` afterwards.
 
 See section 6 for how to read them.
 
-### 5.9 `global_wgcna()`
+### 5.9 `global_wgcna()` (deprecated)
 
-A separate function (not a method): standard WGCNA on the pooled data, as a baseline.
-
-```python
-modules, power = global_wgcna(data, similarity="pearson", network_type="signed", power=None,
-                              powers=None, min_module_size=30, deep_split=2, r2_cut=0.85,
-                              mean_cut=100, layer=None, genes=None, nan="raise", clip=None,
-                              max_abs="auto")
-```
-
-The arguments mean the same as in 5.1, 5.3 and 5.5 (`power=None`: scale-free pick). There is no
-`obs`: all rows are pooled. See [Standard WGCNA](#standard-wgcna).
+Use `ContextWGCNA(data)` without `context_col` ([Standard WGCNA](#standard-wgcna)). `global_wgcna`
+still works, with a `FutureWarning`, and will be removed.
 
 ### 5.10 Lower-level functions
 The steps are also available as plain functions, e.g. for custom pipelines:
@@ -850,7 +837,7 @@ The steps are also available as plain functions, e.g. for custom pipelines:
 | `detect_dominant`, `drop_dominant` | `ctxwgcna.dominance` | dominant LFC profiles |
 | `simulate_lfc(...)` | `ctxwgcna.simulate` | synthetic LFC data with known modules |
 
-The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_blocks`, `compute_support`,
+The most used ones (`ContextWGCNA`, `as_frames`, `make_context_blocks`, `compute_support`,
 `similarity_matrix`, `fisher_z`, `adjacency_from_r`, `context_tom`, `scale_free_table`,
 `pick_power`, `detect_dominant`, `drop_dominant`) can be imported directly from `ctxwgcna`.
 
@@ -917,7 +904,7 @@ them. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override 
 | `--dominant-nan`, `--dominant-max-abs`, `--dominant-max-artifact-z`, `--dominant-clip` | override them for `detect_dominant` only |
 | `--min-submodule-size` | `split_modules(min_size=...)` |
 | `--no-split` | skip `split_modules` |
-| `--global-baseline` | also run `global_wgcna` |
+| `--global-baseline` | also run standard WGCNA (`ContextWGCNA` without `context_col`) on the same rows |
 | `--save-matrices` | save summary r, adjacency and TOM |
 
 The old dominance flags (`--dominant-label-col`, `--dominant-min-fold`, `--dominant-min-z`,
@@ -1013,7 +1000,7 @@ src/ctxwgcna/
   network.py      step 5a: adjacency, scale-free table and power, context-restricted TOM
   modules.py      step 5b: tree cut, module index, context profiles (hard / soft), coherence, eigengenes
   submodules.py   overlapping context-defined split of each module
-  pipeline.py     ContextWGCNA class (runs the steps), global_wgcna baseline
+  pipeline.py     ContextWGCNA class (runs the steps; standard WGCNA without context_col)
   simulate.py     synthetic LFC data with global, local and overlapping modules
 scripts/run_ctxwgcna.py   command-line runner (all ContextWGCNA options + dominance check)
 scripts/make_schematic.py draws docs/schematic.png and docs/schematic-dark.png (the README figure)
