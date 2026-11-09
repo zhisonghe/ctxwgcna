@@ -10,7 +10,7 @@ python scripts/run_ctxwgcna.py --data lfc.csv --obs obs.csv --context-col system
 python scripts/run_ctxwgcna.py --h5ad data.h5ad --layer log2fc --var-subset highly_variable --outdir results/
 
 # demo on simulated data
-python scripts/run_ctxwgcna.py --simulate --outdir results_demo/
+python scripts/run_ctxwgcna.py --simulate --context-col system --outdir results_demo/
 
 See README.md for the meaning of every option.
 """
@@ -89,15 +89,18 @@ def parse_args(argv=None):
                    help="clipping for the dominance scoring only (default: same as --clip)")
 
     c = p.add_argument_group("contexts and similarity")
-    c.add_argument("--context-col", default="system")
+    c.add_argument("--context-col", default=None,
+                   help="obs column defining the contexts (e.g. system). Default: none, i.e. STANDARD WGCNA "
+                        "with all rows in one context; give it for the context-aware method")
     c.add_argument("--contexts", default=None, help="comma-separated subset of contexts to use")
     c.add_argument("--min-obs", type=int, default=10)
     c.add_argument("--similarity", default="pearson", choices=["pearson", "spearman", "bicor", "cosine"])
 
     s = p.add_argument_group("context support")
-    s.add_argument("--top-n", type=int, default=3)
+    s.add_argument("--top-n", type=int, default=None, help="default 3 (1 without --context-col)")
     s.add_argument("--weighting", default="n", choices=["n", "equal"])
-    s.add_argument("--calibrate", default="analytic", choices=["none", "analytic", "permutation"])
+    s.add_argument("--calibrate", default=None, choices=["none", "analytic", "permutation"],
+                   help="default analytic (none without --context-col)")
     s.add_argument("--n-perm", type=int, default=10)
 
     n = p.add_argument_group("network")
@@ -105,7 +108,8 @@ def parse_args(argv=None):
     n.add_argument("--power", type=int, default=None,
                    help="soft-threshold power (default: scale-free pick); given, the power scan is skipped")
     n.add_argument("--r2-cut", type=float, default=0.85)
-    n.add_argument("--tom-mode", default="matched", choices=["matched", "shared", "standard"])
+    n.add_argument("--tom-mode", default=None, choices=["matched", "shared", "standard"],
+                   help="default matched (standard without --context-col)")
 
     m = p.add_argument_group("modules")
     m.add_argument("--min-module-size", type=int, default=30)
@@ -129,6 +133,9 @@ def parse_args(argv=None):
         p.error("give exactly one input: --data and --obs, --h5ad, or --simulate")
     if (args.layer or args.var_subset) and not args.h5ad:
         p.error("--layer and --var-subset need --h5ad")
+    if (args.detect_dominant or args.exclude_dominant) and args.context_col is None:
+        p.error("--detect-dominant / --exclude-dominant need --context-col (profiles are compared within "
+                "their context)")
     return args
 
 

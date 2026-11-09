@@ -202,3 +202,11 @@ silently reused a TOM built on an old support.
 README reordered for notebook use: installation -> step-by-step walkthrough (with re-run table and
 checks) -> input data (incl. value preparation) -> dominance -> ContextWGCNA reference (method
 table, parameters, lower-level functions) -> interpretation -> command line -> resources/method.
+
+## context_col=None is the default: standard WGCNA (2026-11-09)
+ContextWGCNA(context_col=None) puts all rows in one context "all" and sets top_n=1, calibrate='none',
+tom_mode='standard' (top_n/calibrate/tom_mode now default to None = mode-dependent: 3/analytic/
+matched with a context_col). Conflicting values, contexts or support_min_t are overridden with a
+UserWarning. obs is optional for a DataFrame then. Equals global_wgcna exactly (test). CLI follows:
+--context-col default none, --top-n/--calibrate/--tom-mode default by mode; dominance flags require
+--context-col. Simulation demo: standard ARI 0.13 vs context-aware 0.98.

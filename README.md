@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 45 tests, a few seconds
+python -m pytest -q                      # 46 tests, a few seconds
 ```
 
 Then a demo on simulated data (a few seconds):
@@ -94,8 +94,9 @@ print(adjusted_rand_score(truth, modules))   # ≈ 0.98
 subs, mem = cw.split_modules()               # M1 splits into two overlapping submodules
 ```
 
-The same from the command line: `python scripts/run_ctxwgcna.py --simulate --power 12
---min-module-size 20 --outdir results_demo/`.
+The same from the command line: `python scripts/run_ctxwgcna.py --simulate --context-col system
+--power 12 --min-module-size 20 --outdir results_demo/`. Without `context_col` the same data give
+standard WGCNA, which finds only the global module (ARI ≈ 0.13).
 
 ### Use in Jupyter / JupyterHub
 Install the `[jupyter]` extra (`ipykernel`, plus `anndata` to read `.h5ad` files) and register the
@@ -174,6 +175,10 @@ warning says the cap was reached, look at `rows["magnitude_ratio"]` before remov
 
 **2. Set up the contexts.** The constructor prepares the values (`nan`, `max_abs`, `max_artifact_z`,
 `clip`), splits the rows into contexts and stores the settings of the later steps (section 5).
+
+**`context_col` defaults to `None`, which runs standard WGCNA (all rows in one context, no
+context information used). Pass your context column, e.g. `context_col="system"`, to run the
+context-aware method.**
 
 ```python
 cw = ContextWGCNA(lfc, obs, context_col="system")   # pearson, top_n=3, signed, matched TOM
@@ -281,30 +286,36 @@ for p in (8, 12, 16):
    lfc_null = lfc.copy()
    for ctx, idx in obs.groupby("system").groups.items():
        lfc_null.loc[idx] = rng.permuted(lfc.loc[idx].to_numpy(), axis=0)
-   ContextWGCNA(lfc_null, obs).run(power=12)
+   ContextWGCNA(lfc_null, obs, context_col="system").run(power=12)
    ```
 4. **Sensitivity:** vary `top_n` (2 vs 3) and `t_thr` / `jaccard_cut` in the split.
 
 
 ### Standard WGCNA
 
+**`context_col` defaults to `None`, which runs standard WGCNA (all rows in one context, no
+context information used). Pass your context column, e.g. `context_col="system"`, to run the
+context-aware method.**
+
 Two ways, which give identical modules:
 
 ```python
-# 1. one function: pooled correlation over all rows, standard TOM, dynamic tree cut
-modules, power = global_wgcna(lfc, power=12, min_module_size=30)   # power=None: scale-free pick
-
-# 2. ContextWGCNA with a single context: the same network, with the step-by-step methods above
-cw_std = ContextWGCNA(lfc, obs.assign(all="all"), context_col="all",
-                      top_n=1, calibrate="none", tom_mode="standard")
+# 1. ContextWGCNA without context_col: standard WGCNA with the step-by-step methods above
+cw_std = ContextWGCNA(lfc)               # obs is not needed
 cw_std.pick_power(); cw_std.build_network(power=12)
 modules = cw_std.find_modules(min_module_size=30)
+
+# 2. one function: pooled correlation over all rows, standard TOM, dynamic tree cut
+modules, power = global_wgcna(lfc, power=12, min_module_size=30)   # power=None: scale-free pick
 ```
 
-With one context, the "best n contexts" is just the ordinary correlation, there is no selection
-to calibrate, and `tom_mode="standard"` is the plain WGCNA TOM, so the result equals
-`global_wgcna` (checked in the tests). Use `contexts=[...]` with `context_col="system"` to run standard
-WGCNA within one system. `similarity`, `network_type`, `deep_split`, `nan`, `max_abs` and `clip`
+Without `context_col`, all rows form a single context named `"all"`, and `top_n=1`,
+`calibrate="none"` and `tom_mode="standard"` are set for you: with one context the "best n
+contexts" is just the ordinary correlation, there is no selection to calibrate, and the standard
+TOM is the plain WGCNA TOM. Other values passed for these (or `contexts`, `support_min_t`) are
+overridden with a warning. The result equals `global_wgcna` (checked in the tests). To run standard
+WGCNA within one system, pass `context_col="system", contexts=["sysA"], top_n=1,
+calibrate="none", tom_mode="standard"`. `similarity`, `network_type`, `deep_split`, `nan`, `max_abs` and `clip`
 work as usual. Compared with the R package, both skip module merging by eigengene correlation and
 the PAM stage ([Known limitations](#10-known-limitations)); the tree cut is the same
 (`dynamicTreeCut`). `split_modules()` on a single context gives at most one submodule per module: its core of genes
@@ -395,7 +406,8 @@ passing an AnnData object needs nothing extra.
 - **Gene filtering:** memory and time grow with genes² (section 8). About 1,000–5,000 genes is
   comfortable. Filter for genes with meaningful LFC variation (e.g. LFC variance, or differentially
   expressed in at least one context), not for genes correlated with something.
-- **Contexts:** choose **one** annotation column as the context (`system` *or* `condition`).
+- **Contexts:** choose **one** annotation column as the context (`system` *or* `condition`) and
+  pass it as `context_col`; **without it (`context_col=None`, the default) you get standard WGCNA.**
   Similarities are computed across the observations *within* each context, so:
   - `context_col="system"` → each system's genes are correlated across its conditions (e.g. 300).
   - `context_col="condition"` → each condition's genes are correlated across systems (e.g. 20).
@@ -628,21 +640,25 @@ them.
 
 ### 5.1 The constructor
 
+**`context_col` defaults to `None`, which runs standard WGCNA (all rows in one context, no
+context information used). Pass your context column, e.g. `context_col="system"`, to run the
+context-aware method.**
+
 Grouped by topic; pass them by name.
 
 ```python
-ContextWGCNA(data, obs=None, context_col="system", contexts=None, min_obs=10,
+ContextWGCNA(data, obs=None, context_col=None, contexts=None, min_obs=10,
              layer=None, genes=None, nan="raise", max_abs="auto", max_artifact_z=None, clip=None,
-             similarity="pearson", top_n=3, weighting="n", calibrate="analytic", n_perm=10,
+             similarity="pearson", top_n=None, weighting="n", calibrate=None, n_perm=10,
              selection=None, store_context_t="auto", store_max_mb=2048,
-             network_type="signed", tom_mode="matched", support_min_t=None,
+             network_type="signed", tom_mode=None, support_min_t=None,
              seed=0, chunk_mb=128)
 ```
 
 | Parameter | Default | Used by | Meaning / when to change |
 |---|---|---|---|
 | **Input** | | | |
-| `data` / `obs` | | constructor | The data (LFC or expression): a DataFrame plus observation table, or an AnnData object (then `obs` defaults to `adata.obs`). |
+| `data` / `obs` | | constructor | The data (LFC or expression): a DataFrame plus observation table, or an AnnData object (then `obs` defaults to `adata.obs`). `obs` is not needed for a DataFrame without `context_col`. |
 | `layer` | `None` | constructor | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
 | `genes` | `None` (all) | constructor | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
 | **Value preparation** (section 3) | | | |
@@ -651,21 +667,21 @@ ContextWGCNA(data, obs=None, context_col="system", contexts=None, min_obs=10,
 | `max_artifact_z` | `None` | constructor | Leave out rows with unusually many masked genes for their context (`artifact_z` > this, e.g. 3). |
 | `clip` | `None` | constructor | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. |
 | **Contexts** | | | |
-| `context_col` | `"system"` | constructor | Column of `obs` that defines contexts. |
+| `context_col` | **`None`: standard WGCNA** | constructor | **Column of `obs` that defines the contexts (e.g. `"system"`). Without it, all rows form one context and `top_n`, `calibrate` and `tom_mode` take their standard-WGCNA values (overridden with a warning if given otherwise); see [Standard WGCNA](#standard-wgcna).** |
 | `contexts` | `None` (all) | constructor | List of context names to use, e.g. to exclude a system. |
 | `min_obs` | `10` | constructor | Contexts with fewer observations are dropped (must be ≥ 4). Raise it for condition contexts if correlations look noisy. |
 | **Similarity** | | | |
 | `similarity` | `"pearson"` | `compute_support` | `pearson`: co-variation around each context's mean. `spearman`: rank-based, robust to outliers. `bicor`: biweight midcorrelation (WGCNA's robust choice). `cosine`: **uncentred**, so it also rewards genes that move in the same direction relative to LFC = 0 (e.g. both up across a whole system). With `cosine`, use `calibrate="permutation"`. |
 | **Context support (top-n union)** | | | |
-| `top_n` | `3` | `compute_support` | Number of best contexts summarized per pair. This sets the **minimum breadth of support** for an edge: `top_n=1` means "strong in any single context" and is noisiest; `2`–`3` is recommended. With K contexts, `top_n ≈ K` approaches ordinary pooled correlation. |
+| `top_n` | `3` (`1` without `context_col`) | `compute_support` | Number of best contexts summarized per pair. This sets the **minimum breadth of support** for an edge: `top_n=1` means "strong in any single context" and is noisiest; `2`–`3` is recommended. With K contexts, `top_n ≈ K` approaches ordinary pooled correlation. |
 | `weighting` | `"n"` | `compute_support` | Weight of each selected context in the summary: `n` = by n_obs − 3 (pooled Fisher z); `equal` = plain mean. |
-| `calibrate` | `"analytic"` | `compute_support` | Removes the optimism of picking the best n of K. `analytic` assumes independent contexts and that t = z·√(n_c−3) is standard normal under the null: exact in large samples for pearson, an approximation for spearman/bicor (use `permutation` there when the exact null matters); fast. `permutation` permutes each gene within each context `n_perm` times; required for `cosine`, and safer if contexts are strongly dependent. `none` skips it. |
+| `calibrate` | `"analytic"` (`"none"` without `context_col`) | `compute_support` | Removes the optimism of picking the best n of K. `analytic` assumes independent contexts and that t = z·√(n_c−3) is standard normal under the null: exact in large samples for pearson, an approximation for spearman/bicor (use `permutation` there when the exact null matters); fast. `permutation` permutes each gene within each context `n_perm` times; required for `cosine`, and safer if contexts are strongly dependent. `none` skips it. |
 | `n_perm` | `10` | `compute_support` | Permutations for `calibrate="permutation"`. |
 | `selection` | follows `network_type` | `compute_support`, `split_modules` | `positive` (rank by signed t) for signed networks; `absolute` (\|t\|) for unsigned. Set only to override. |
 | `store_context_t` / `store_max_mb` | `"auto"` / `2048` | `compute_support` | Keep all per-context statistics (K × G² × 4 bytes) for soft context weights and module splitting. If they exceed `store_max_mb`, they are recomputed for module genes when needed (slower, same result). |
 | **Network** | | | |
 | `network_type` | `"signed"` | `pick_power`, `build_network` | `signed`: a = ((1 + r)/2)^β; negatively correlated genes are disconnected. `signed hybrid`: a = r^β for r > 0, else 0. `unsigned`: a = \|r\|^β; positively and negatively correlated genes can share a module. |
-| `tom_mode` | `"matched"` | `build_network` | `matched`: a shared neighbour u counts for (i, j) only if i–u, u–j **and** i–j share a supporting context. `shared`: i–u and u–j must share a context. `standard`: ordinary WGCNA TOM (context-blind). |
+| `tom_mode` | `"matched"` (`"standard"` without `context_col`) | `build_network` | `matched`: a shared neighbour u counts for (i, j) only if i–u, u–j **and** i–j share a supporting context. `shared`: i–u and u–j must share a context. `standard`: ordinary WGCNA TOM (context-blind). |
 | `support_min_t` | `None` | `build_network`, `module_context_profile(soft=False)` | Optionally count a top-n context as "supporting" a pair only if its t ≥ this value. |
 | **Performance** | | | |
 | `seed` | `0` | `compute_support` | For permutation / Monte-Carlo calibration. |
@@ -885,7 +901,8 @@ python scripts/run_ctxwgcna.py \
 
 Every flag is the parameter name with dashes (`--min-module-size` = `min_module_size`); `-h` lists
 them. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
-The flags that differ:
+**As in Python, without `--context-col` the script runs standard WGCNA**; `--detect-dominant` and
+`--exclude-dominant` need it. The flags that differ:
 
 | Flag | Python equivalent |
 |---|---|

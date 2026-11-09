@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import pandas as pd
 import pytest
@@ -167,7 +168,7 @@ def test_context_tom_removes_cross_context_overlap():
 
     ratio = {}
     for mode in ("standard", "matched"):
-        cw = ContextWGCNA(fc, obs, top_n=2, tom_mode=mode)
+        cw = ContextWGCNA(fc, obs, top_n=2, tom_mode=mode, context_col="system")
         cw.compute_support()
         tom = cw.build_network(power=12)
         ratio[mode] = block_mean(tom, "P", "R") / block_mean(tom, "noise", "noise")
@@ -198,7 +199,7 @@ def test_split_module_pure_noise_gives_nothing():
 
 def test_split_recovers_overlap_and_keeps_coherent_modules_whole():
     fc, obs, truth = simulate_lfc(seed=0)
-    cw = ContextWGCNA(fc, obs, top_n=2)
+    cw = ContextWGCNA(fc, obs, top_n=2, context_col="system")
     cw.run(power=12, min_module_size=20)
     subs, mem = cw.split_modules()
     M = cw.membership_matrix()
@@ -220,9 +221,9 @@ def test_split_recovers_overlap_and_keeps_coherent_modules_whole():
 
 def test_stored_and_recomputed_context_statistics_agree():
     fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
-    a = ContextWGCNA(fc, obs, top_n=2)
+    a = ContextWGCNA(fc, obs, top_n=2, context_col="system")
     a.compute_support()
-    b = ContextWGCNA(fc, obs, top_n=2)
+    b = ContextWGCNA(fc, obs, top_n=2, context_col="system")
     b.support = compute_support(b.blocks, top_n=2, store_context_t=False)
     idx = np.arange(0, 320, 7)
     np.testing.assert_allclose(a._context_t(idx), b._context_t(idx), rtol=1e-5, atol=1e-4)
@@ -411,30 +412,30 @@ def small_data():
 
 def test_contextwgcna_nan_and_clip(small_data):
     fc, obs = small_data
-    base = ContextWGCNA(fc, obs, calibrate="none")
+    base = ContextWGCNA(fc, obs, calibrate="none", context_col="system")
     assert base.data is fc and base.preprocessing["clip_bounds"] is None  # untouched by default
     # skip: all-NaN rows dropped, identical to dropping them by hand
     fc_nan = fc.copy()
     fc_nan.iloc[[0, 5]] = np.nan
     with pytest.raises(ValueError, match="NaN"):
-        ContextWGCNA(fc_nan, obs, calibrate="none")
-    skip = ContextWGCNA(fc_nan, obs, calibrate="none", nan="skip")
+        ContextWGCNA(fc_nan, obs, calibrate="none", context_col="system")
+    skip = ContextWGCNA(fc_nan, obs, calibrate="none", nan="skip", context_col="system")
     keep = fc_nan.notna().any(axis=1)
-    manual = ContextWGCNA(fc_nan[keep], obs[keep], calibrate="none")
+    manual = ContextWGCNA(fc_nan[keep], obs[keep], calibrate="none", context_col="system")
     assert len(skip.data) == len(fc) - 2 and skip.data.index.equals(manual.data.index)
     np.testing.assert_array_equal(skip.compute_support().r, manual.compute_support().r)
     # partly-NaN rows cannot be skipped; filling works
     fc_part = fc.copy()
     fc_part.iloc[1, :3] = np.nan
     with pytest.raises(ValueError, match="partly NaN"):
-        ContextWGCNA(fc_part, obs, calibrate="none", nan="skip")
-    filled = ContextWGCNA(fc_part, obs, calibrate="none", nan=0)
+        ContextWGCNA(fc_part, obs, calibrate="none", nan="skip", context_col="system")
+    filled = ContextWGCNA(fc_part, obs, calibrate="none", nan=0, context_col="system")
     assert (filled.data.iloc[1, :3] == 0).all()
     # clip: identical to clipping by hand; percentile bounds recorded
-    a = ContextWGCNA(fc, obs, calibrate="none", clip=1.5).compute_support().r
-    b = ContextWGCNA(fc.clip(-1.5, 1.5), obs, calibrate="none").compute_support().r
+    a = ContextWGCNA(fc, obs, calibrate="none", clip=1.5, context_col="system").compute_support().r
+    b = ContextWGCNA(fc.clip(-1.5, 1.5), obs, calibrate="none", context_col="system").compute_support().r
     np.testing.assert_array_equal(a, b)
-    p = ContextWGCNA(fc, obs, calibrate="none", clip="p95")
+    p = ContextWGCNA(fc, obs, calibrate="none", clip="p95", context_col="system")
     assert np.isclose(p.preprocessing["clip_bounds"][1], np.percentile(np.abs(fc.to_numpy()), 95))
     assert np.abs(p.data.to_numpy()).max() <= p.preprocessing["clip_bounds"][1]
 
@@ -505,7 +506,7 @@ def test_artifact_row_exclusion(small_data):
     rows_all, _ = detect_dominant(data, obs, max_abs=15, verbose=False)
     assert not rows_all.artifact_excluded.any() and (rows_all.loc[lfc.index[bad], "artifact_z"] > 3).all()
     # network: the same rows are left out
-    cw = ContextWGCNA(data, obs, calibrate="none", max_abs=15, max_artifact_z=3)
+    cw = ContextWGCNA(data, obs, calibrate="none", max_abs=15, max_artifact_z=3, context_col="system")
     assert len(cw.data) == len(lfc) - 3 and not cw.data.index.isin(lfc.index[bad]).any()
     with pytest.raises(ValueError, match="context_col"):
         from ctxwgcna.data import prepare_frames
@@ -539,13 +540,13 @@ def test_max_abs_masking(dominance_data, small_data):
     lfc, obs2 = small_data
     lfc_art = lfc.copy()
     lfc_art.iloc[3, :5] = 35.0
-    cw = ContextWGCNA(lfc_art, obs2, calibrate="none", max_abs=15, clip="p95")
+    cw = ContextWGCNA(lfc_art, obs2, calibrate="none", max_abs=15, clip="p95", context_col="system")
     ref = lfc_art.mask(lfc_art.abs() > 15, 0.0)
     assert cw.preprocessing["n_masked"] == 5 and (cw.data.iloc[3, :5] == 0).all()
     assert np.isclose(cw.preprocessing["clip_bounds"][1], np.percentile(np.abs(ref.to_numpy()), 95))
     np.testing.assert_array_equal(
         cw.compute_support().r,
-        ContextWGCNA(ref.clip(*cw.preprocessing["clip_bounds"]), obs2, calibrate="none").compute_support().r)
+        ContextWGCNA(ref.clip(*cw.preprocessing["clip_bounds"]), obs2, calibrate="none", context_col="system").compute_support().r)
 
 
 def test_max_abs_auto(small_data):
@@ -567,7 +568,7 @@ def test_max_abs_auto(small_data):
     ref, _ = detect_dominant(lfc_art, obs, max_abs=cutoff, verbose=False)
     pd.testing.assert_frame_equal(rows, ref)
     assert rows.attrs["preprocessing"]["n_masked"] == art.sum()
-    cw = ContextWGCNA(lfc_art, obs, calibrate="none", max_abs="auto")
+    cw = ContextWGCNA(lfc_art, obs, calibrate="none", max_abs="auto", context_col="system")
     assert cw.preprocessing["max_abs_rule"] == "auto" and np.isclose(cw.preprocessing["max_abs"], cutoff)
     with pytest.raises(ValueError, match="max_abs"):
         detect_dominant(lfc, obs, max_abs="p99", verbose=False)
@@ -636,7 +637,7 @@ def test_input_validation():
 @pytest.fixture(scope="module")
 def small_run():
     fc, obs, truth = simulate_lfc(n_genes=320, seed=5)
-    cw = ContextWGCNA(fc, obs, support_min_t=2.0)
+    cw = ContextWGCNA(fc, obs, support_min_t=2.0, context_col="system")
     return cw
 
 
@@ -676,12 +677,12 @@ def adata_example():
 
 def test_anndata_input_matches_dataframe(adata_example):
     ad, fc, obs = adata_example
-    a = ContextWGCNA(ad, layer="log2fc").compute_support()
-    b = ContextWGCNA(fc, obs).compute_support()
+    a = ContextWGCNA(ad, layer="log2fc", context_col="system").compute_support()
+    b = ContextWGCNA(fc, obs, context_col="system").compute_support()
     np.testing.assert_array_equal(a.z, b.z)
     assert list(a.genes) == list(fc.columns)
     # gene subset by boolean .var column, and by list of names
-    sub = ContextWGCNA(ad, layer="log2fc", genes="keep")
+    sub = ContextWGCNA(ad, layer="log2fc", genes="keep", context_col="system")
     assert list(sub.genes) == list(fc.columns[:150])
     assert list(ContextWGCNA(ad, layer="log2fc", genes=["g0003", "g0001"]).genes) == ["g0003", "g0001"]
     labels, _ = global_wgcna(ad, layer="log2fc", power=12, min_module_size=20)
@@ -695,7 +696,7 @@ def test_anndata_errors(adata_example):
     with pytest.raises(ValueError, match="only used with AnnData"):
         ContextWGCNA(fc, obs, layer="log2fc")
     with pytest.raises(ValueError, match="obs .* is required"):
-        ContextWGCNA(fc)
+        ContextWGCNA(fc, context_col="system")
     with pytest.raises(ValueError, match="not a column of adata.var"):
         ContextWGCNA(ad, layer="log2fc", genes="nope")
 
@@ -730,7 +731,7 @@ def test_cli_h5ad(adata_example, tmp_path):
 
 def test_steps_clear_only_downstream_results():
     fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
-    cw = ContextWGCNA(fc, obs, top_n=2, calibrate="none")
+    cw = ContextWGCNA(fc, obs, top_n=2, calibrate="none", context_col="system")
     cw.run(power=12, min_module_size=10)
     cw.split_modules()
     support, tom, modules = cw.support, cw.tom, cw.modules
@@ -774,6 +775,23 @@ def test_single_context_equals_standard_wgcna():
     cw = ContextWGCNA(fc, obs.assign(all="all"), context_col="all", top_n=1, calibrate="none",
                       tom_mode="standard")
     assert (cw.run(power=12, min_module_size=20) == pooled).all()
-    one = ContextWGCNA(fc, obs, contexts=["sys0"], top_n=1, calibrate="none", tom_mode="standard")
+    one = ContextWGCNA(fc, obs, contexts=["sys0"], top_n=1, calibrate="none", tom_mode="standard", context_col="system")
     sys0, _ = global_wgcna(fc[obs["system"] == "sys0"], power=12, min_module_size=20)
     assert (one.run(power=12, min_module_size=20) == sys0).all()
+
+
+def test_context_col_none_is_standard_wgcna():
+    fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
+    pooled, _ = global_wgcna(fc, power=12, min_module_size=20)
+    cw = ContextWGCNA(fc)                                   # default: no obs needed
+    assert (cw.top_n, cw.calibrate, cw.tom_mode) == (1, "none", "standard")
+    assert [b.name for b in cw.blocks] == ["all"] and cw.context_col is None
+    assert (cw.run(power=12, min_module_size=20) == pooled).all()
+    with pytest.warns(UserWarning, match="runs standard WGCNA.*top_n=3.*tom_mode='matched'"):
+        cw2 = ContextWGCNA(fc, obs, top_n=3, tom_mode="matched")
+    assert (cw2.top_n, cw2.tom_mode) == (1, "standard") and list(cw2.obs.columns) == list(obs.columns)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                      # standard values given: no warning
+        ContextWGCNA(fc, obs, top_n=1, calibrate="none", tom_mode="standard")
+    ctx = ContextWGCNA(fc, obs, context_col="system")       # context-aware defaults
+    assert (ctx.top_n, ctx.calibrate, ctx.tom_mode) == (3, "analytic", "matched")

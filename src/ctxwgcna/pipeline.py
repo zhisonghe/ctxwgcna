@@ -1,13 +1,21 @@
 """ContextWGCNA: WGCNA on a 'union over contexts' similarity with a context-restricted TOM."""
+import warnings
+
 import numpy as np
 import pandas as pd
 
 from . import modules as _mod
 from . import network as _net
 from . import submodules as _sub
-from .data import as_frames, make_context_blocks, prepare_frames, warn_if_linear_fc
+from .data import as_frames, is_anndata, make_context_blocks, prepare_frames, warn_if_linear_fc
 from .similarity import similarity_matrix, standardized_z
 from .support import compute_support, soft_context_weights
+
+
+# settings that differ between the context-aware method and standard WGCNA (context_col=None)
+CONTEXT_DEFAULTS = {"top_n": 3, "calibrate": "analytic", "tom_mode": "matched"}
+STANDARD_SETTINGS = {"top_n": 1, "calibrate": "none", "tom_mode": "standard"}
+ALL_CONTEXT = "all"  # name of the single context when context_col is None
 
 
 class ContextWGCNA:
@@ -21,7 +29,11 @@ class ContextWGCNA:
                         dynamic tree cut -> per-module context profiles
       then optionally   split_modules(): overlapping, context-defined submodules per module
 
-    Typical use:  cw = ContextWGCNA(data, obs); cw.run(); cw.split_modules()
+    context_col=None (the default) runs STANDARD WGCNA: all rows form one context, with top_n=1,
+    calibrate='none' and tom_mode='standard' (other values for these are overridden with a warning).
+    The result equals global_wgcna(). Pass context_col (e.g. 'system') for the context-aware method.
+
+    Typical use:  cw = ContextWGCNA(data, obs, context_col="system"); cw.run(); cw.split_modules()
              or:  cw = ContextWGCNA(adata, layer="log2fc", genes="highly_variable")
     Each step can also be called on its own; missing earlier steps are run automatically.
     Re-running a step clears only the results that depend on it (later steps), never earlier ones.
@@ -57,17 +69,43 @@ class ContextWGCNA:
     See README.md section 5 for all parameters (section 2 for a walkthrough).
     """
 
-    def __init__(self, data, obs=None, context_col="system", contexts=None, similarity="pearson", top_n=3,
-                 network_type="signed", selection=None, weighting="n", calibrate="analytic", n_perm=10,
-                 tom_mode="matched", support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
+    def __init__(self, data, obs=None, context_col=None, contexts=None, similarity="pearson", top_n=None,
+                 network_type="signed", selection=None, weighting="n", calibrate=None, n_perm=10,
+                 tom_mode=None, support_min_t=None, min_obs=10, seed=0, chunk_mb=128,
                  store_context_t="auto", store_max_mb=2048, layer=None, genes=None, nan="raise",
                  clip=None, max_abs="auto", max_artifact_z=None):
         if network_type not in _net.NETWORK_TYPES:
             raise ValueError(f"network_type must be one of {_net.NETWORK_TYPES}")
+        # --- standard WGCNA (one context) or context-aware: resolve the mode-dependent settings ---
+        given = {"top_n": top_n, "calibrate": calibrate, "tom_mode": tom_mode}
+        if context_col is None:
+            ignored = {k: v for k, v in given.items() if v is not None and v != STANDARD_SETTINGS[k]}
+            if contexts is not None:
+                ignored["contexts"] = contexts
+            if support_min_t is not None:
+                ignored["support_min_t"] = support_min_t
+            if ignored:
+                warnings.warn(
+                    "context_col=None runs standard WGCNA (all rows in one context); ignoring "
+                    + ", ".join(f"{k}={v!r}" for k, v in ignored.items())
+                    + f" and using {', '.join(f'{k}={v!r}' for k, v in STANDARD_SETTINGS.items())}. "
+                    "Pass context_col for the context-aware method.", UserWarning, stacklevel=2)
+            settings, contexts, support_min_t = dict(STANDARD_SETTINGS), None, None
+        else:
+            settings = {k: CONTEXT_DEFAULTS[k] if v is None else v for k, v in given.items()}
+        top_n, calibrate, tom_mode = settings["top_n"], settings["calibrate"], settings["tom_mode"]
+
         # --- input: DataFrame + obs, or AnnData (optionally a layer and a gene subset) ---
+        if context_col is None and obs is None and not is_anndata(data):
+            obs = pd.DataFrame(index=data.index)  # no annotation needed for standard WGCNA
         data, obs = as_frames(data, obs, layer=layer, genes=genes)
+        ctx_col = context_col
+        if context_col is None:  # one context holding every row, in a temporary obs column
+            ctx_col = "__ctxwgcna_all__"
+            obs = obs.copy()
+            obs[ctx_col] = ALL_CONTEXT
         data, obs, self.preprocessing = prepare_frames(data, obs, nan=nan, clip=clip, max_abs=max_abs,
-                                                       context_col=context_col, max_artifact_z=max_artifact_z)
+                                                       context_col=ctx_col, max_artifact_z=max_artifact_z)
         if similarity == "cosine":  # uncentred: needs 0 = "no change"
             warn_if_linear_fc(data.to_numpy(dtype=np.float64), "similarity='cosine'")
         self.data, self.obs, self.layer = data, obs, layer
@@ -83,7 +121,9 @@ class ContextWGCNA:
         self.store_context_t, self.store_max_mb = store_context_t, store_max_mb
 
         # --- step 1 now; results of later steps are filled in as they run ---
-        self.blocks = make_context_blocks(data, obs, context_col, contexts=contexts, min_obs=min_obs)
+        self.blocks = make_context_blocks(data, obs, ctx_col, contexts=contexts, min_obs=min_obs)
+        if context_col is None:
+            self.obs = obs.drop(columns=[ctx_col])
         self.support = None  # ContextSupport (steps 2-4)
         self.power = None  # soft-threshold power
         self.sft = None  # scale-free fit table
