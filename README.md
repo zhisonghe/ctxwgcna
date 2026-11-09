@@ -77,7 +77,7 @@ pip install -e ".[test]"
 ### Check the installation
 
 ```bash
-python -m pytest -q                      # 43 tests, a few seconds
+python -m pytest -q                      # 44 tests, a few seconds
 ```
 
 Then a demo on simulated data (a few seconds):
@@ -141,7 +141,153 @@ matching PyWGCNA's output to 1e-13. `external/PyWGCNA/` (a source clone) and
 
 ---
 
-## 2. Preparing the input
+## 2. Walkthrough: a full analysis step by step
+
+A complete run, one step per notebook cell. Each step stores its result on the object (`cw.support`,
+`cw.sft`, `cw.tom`, `cw.modules`, `cw.submodules`), so you can look at it before going on and redo
+any step with other settings ([Re-running a step](#re-running-a-step)). Sections 3–6 explain every
+option.
+
+**0. Load the data.** An observations × genes matrix and an observation table with the same row
+index (section 3).
+
+```python
+import pandas as pd
+from ctxwgcna import ContextWGCNA, detect_dominant, drop_dominant, global_wgcna
+
+lfc = pd.read_csv("lfc.csv", index_col=0)   # rows "sysA|cond001", ...; columns = genes
+obs = pd.read_csv("obs.csv", index_col=0)   # same index; columns "system", "condition"
+# AnnData instead: pass adata (with layer=..., genes=...) wherever lfc, obs is passed below
+```
+
+**1. Remove dominant conditions** (section 4). A few conditions with far larger, broader changes
+than the rest would otherwise form giant modules.
+
+```python
+rows, summary = detect_dominant(lfc, obs, context_col="system", condition_col="condition")
+summary.head(10)                         # most widely flagged conditions first
+lfc, obs = drop_dominant(lfc, obs, rows)
+```
+
+Check the printed report: how many profiles were flagged, and what was masked (`max_abs`). If a
+warning says the cap was reached, look at `rows["magnitude_ratio"]` before removing anything.
+
+**2. Set up the contexts.** The constructor prepares the values (`nan`, `max_abs`, `max_artifact_z`,
+`clip`), splits the rows into contexts and stores the settings of the later steps (section 5).
+
+```python
+cw = ContextWGCNA(lfc, obs, context_col="system")   # pearson, top_n=3, signed, matched TOM
+cw.preprocessing                         # what was done to the values
+{b.name: b.n_obs for b in cw.blocks}     # contexts used and their sizes (< min_obs: dropped)
+```
+
+**3. Context support:** per-context correlations, each pair's best `top_n` contexts and the
+calibrated summary. This is the slowest step.
+
+```python
+cw.compute_support()
+cw.support.bias                          # amount removed by the calibration (Fisher z)
+cw.support.pair_profile("GeneA", "GeneB")   # one pair in every context
+```
+
+**4. Choose the soft-threshold power.**
+
+```python
+cw.pick_power()                          # scale-free fit table, also in cw.sft
+cw.power                                 # the automatic pick: a starting point only
+```
+
+Signed networks usually need 12–20 ([Choosing the power](#choosing-the-power)).
+
+**5. Network and hard modules.**
+
+```python
+cw.build_network(power=12)               # adjacency + context-restricted TOM
+modules = cw.find_modules(min_module_size=30, deep_split=2)
+modules.value_counts()                   # M0 = unassigned
+```
+
+**6. Overlapping submodules:** each module split by the contexts it holds in; genes may belong to
+several submodules.
+
+```python
+subs, mem = cw.split_modules(t_thr=3.0, jaccard_cut=0.5)
+subs                                     # parent, contexts, sizes, overlap
+cw.membership_matrix()                   # genes x submodules (bool)
+```
+
+**7. Interpret** (section 6).
+
+```python
+cw.module_context_profile()              # which contexts carry each module
+cw.module_context_coherence()            # direct per-context check
+cw.context_eigengenes("M3", contexts=["sysA", "sysB"])
+```
+
+**8. Compare with standard WGCNA** on the pooled data: global modules should appear in both, local
+ones only in the context run.
+
+```python
+glob_modules, glob_power = global_wgcna(lfc, power=12, min_module_size=30)
+pd.crosstab(modules, glob_modules)
+```
+
+`cw.run(power=12, min_module_size=30)` does steps 3–5 in one call (the power is picked if not
+given). Calling a step before the earlier ones runs those first, so `cw.find_modules()` on a fresh
+object works too; `split_modules()` needs `find_modules()`.
+
+### Re-running a step
+
+Re-running a step keeps the results of the earlier steps and clears those of the later ones, which
+were built on the old result. For example, `build_network(power=16)` reuses `cw.support` and clears
+`cw.modules` and `cw.submodules`.
+
+| To change | Set it in | Then re-run |
+|---|---|---|
+| `nan`, `max_abs`, `max_artifact_z`, `clip`, `context_col`, `contexts`, `min_obs`, `layer`, `genes` | the constructor | a new `ContextWGCNA(...)` |
+| `similarity`, `top_n`, `weighting`, `calibrate`, `n_perm`, `selection` | the constructor, or the attribute (`cw.top_n = 2`) | from step 3 |
+| `power` | `build_network(power=...)` | from step 5 |
+| `network_type`, `tom_mode`, `support_min_t` | the constructor, or the attribute | from step 5 (`network_type` also changes step 3 unless `selection` is set) |
+| `min_module_size`, `deep_split` | `find_modules(...)` | from step 5 (`find_modules` only) |
+| `t_thr`, `jaccard_cut`, `min_partners`, … | `split_modules(...)` | step 6 only |
+
+A changed attribute is noticed: the next step recomputes whatever was made with the old value
+(`cw.top_n = 2; cw.find_modules()` recomputes the support and the TOM first). A power chosen by
+`pick_power()` is re-picked after a new support; a power you gave is kept. `split_modules()` and
+`module_context_profile()` refuse to run on modules made with settings changed since, and ask
+for `find_modules()` first.
+
+Compare a few powers without recomputing the support:
+
+```python
+for p in (8, 12, 16):
+    cw.build_network(power=p)
+    print(p, cw.find_modules(min_module_size=30).value_counts().head())
+```
+
+### Checks before trusting the result
+
+1. **Power:** compare modules at 2–3 powers (above) and keep what is stable.
+2. **Calibration:** rerun once with `calibrate="permutation"`; `cw.support.bias` should agree closely
+   with `"analytic"` for Pearson (simulation: 0.0852 both).
+   ```python
+   cw.calibrate = "permutation"; cw.compute_support(); cw.support.bias
+   ```
+3. **Negative control:** permute each gene within each context. This should give few or no modules
+   and no submodules (simulation: all 1,000 genes unassigned).
+   ```python
+   import numpy as np
+   rng = np.random.default_rng(0)
+   lfc_null = lfc.copy()
+   for ctx, idx in obs.groupby("system").groups.items():
+       lfc_null.loc[idx] = rng.permuted(lfc.loc[idx].to_numpy(), axis=0)
+   ContextWGCNA(lfc_null, obs).run(power=12)
+   ```
+4. **Sensitivity:** vary `top_n` (2 vs 3) and `t_thr` / `jaccard_cut` in the split.
+
+---
+
+## 3. Input data
 
 You need a data matrix (observations × genes) and an observation table with the **same row
 index**, either as two pandas tables or as one AnnData object (see [AnnData input](#anndata-input)).
@@ -221,7 +367,7 @@ passing an AnnData object needs nothing extra.
   inside the gap gives the same result), or turn masking off with `max_abs=None`. If unstable LFCs were instead capped (e.g. at
   ±10), clip to a lower value: `clip=3`, or a data-driven `clip="p95"`. All three options work in
   both `ContextWGCNA` and `detect_dominant`; shrunken LFCs avoid the problem at the source.
-- **Gene filtering:** memory and time grow with genes² (section 7). About 1,000–5,000 genes is
+- **Gene filtering:** memory and time grow with genes² (section 8). About 1,000–5,000 genes is
   comfortable. Filter for genes with meaningful LFC variation (e.g. LFC variance, or differentially
   expressed in at least one context), not for genes correlated with something.
 - **Contexts:** choose **one** annotation column as the context (`system` *or* `condition`).
@@ -232,69 +378,24 @@ passing an AnnData object needs nothing extra.
   Contexts with fewer than `min_obs` observations are dropped. Correlations from very few
   observations are noise.
 
-### Using expression data instead of LFC
-Nothing in the core method needs fold changes: per-context similarities, top-n selection, the
-context TOM, modules and the submodule split work the same on a log-normalised or variance-stabilised
-expression matrix (e.g. DESeq2 `vst`, log-CPM), rows = samples, columns = genes. Correlations are
-computed within each context, so each context's own mean is removed and baseline differences
-between contexts do not create co-expression.
-
-Two parts assume LFC, where 0 means "no change":
-
-| Part | Why it assumes LFC | With expression data |
-|---|---|---|
-| `similarity="cosine"` | uncentred: rewards genes moving away from 0 together | 0 has no meaning, so cosine mostly reflects expression level. Use `pearson`, `spearman` or `bicor`. |
-| `detect_dominant` | a profile's size is its distance from 0 (sum of squares) | it would flag highly expressed samples. Centre each gene within its context first (`X - X.groupby(obs[context_col]).transform("mean")`), or skip this step. |
-
-Each context still needs enough samples for a stable correlation (`min_obs`, default 10; 15–20 or
-more is better). With LFC from a 300-condition design this is easy; with plain expression data a
-context is often only a few replicates, too few to use as a context on their own.
-
-### Dominant conditions: detect and remove them first
-
-Sometimes one condition (or a few) produces far larger changes than the rest, in **most** genes.
-With Pearson correlation, that single condition dominates: its responders form giant blocks that
-absorb and break up the real modules. Robust correlations (Spearman, bicor) would neutralise it,
-but they also erase genuine programmes that respond in only a few conditions, which is exactly the
-local structure this method is for. The recommended approach is therefore: **flag those LFC profiles,
-remove them, keep Pearson, and analyse the flagged conditions separately.**
-
-Evidence from simulation (1,000 genes, 20 systems × 300 conditions; F1 of planted-module recovery):
-
-| | global module | local L1 | local L2 | 5-condition programme |
-|---|---|---|---|---|
-| three dominant conditions kept (Pearson) | 0.83 | 0.60 | 0.26 | 0.11 |
-| Spearman or bicor instead (one dominant condition) | ✓ | ✓ | ✓ | **0.0** |
-| **flagged profiles removed (Pearson)** | **0.98** | **1.0** | **1.0** | **1.0** |
-
-```python
-from ctxwgcna import detect_dominant, drop_dominant
-
-rows, summary = detect_dominant(lfc, obs, context_col="system", condition_col="condition")
-print(summary.head(10))          # per condition: in how many systems it is dominant
-lfc_clean, obs_clean = drop_dominant(lfc, obs, rows)
-cw = ContextWGCNA(lfc_clean, obs_clean, context_col="system")
-
-# with AnnData: drop_dominant returns a filtered copy
-rows, summary = detect_dominant(adata, layer="log2fc")
-adata_clean = drop_dominant(adata, rows=rows)
-```
-
-**Missing values and extreme LFCs.** Four options prepare the values before scoring, applied in
-this order: `nan`, `max_abs`, `max_artifact_z`, `clip`. `ContextWGCNA` and `global_wgcna` take the same options
-(section 4); in `detect_dominant` they affect the scoring only, and the data you pass on is not
-changed.
+### Missing values and implausible LFCs
+Four options prepare the values, applied in this order: `nan`, `max_abs`, `max_artifact_z`, `clip`.
+`ContextWGCNA` and `detect_dominant` take all four, `global_wgcna` all but `max_artifact_z`. Pass
+the same values to both steps. In `detect_dominant` they affect the scoring only, and the data you
+pass on is not changed; in `ContextWGCNA`, `.data` holds the prepared values and `.preprocessing`
+records what was done. Several examples below refer to dominance detection (section 4), where these
+values matter most.
 
 | Option | Values | Effect |
 |---|---|---|
 | `nan` | `"raise"` (default) | error on any NaN |
-| | `"skip"` | all-NaN rows (untested combinations) are not scored (metrics NaN, never dominant, not counted in `n_contexts`); other NaN entries are ignored (magnitude scaled up to all genes, `frac_genes_extreme` over the observed genes) |
+| | `"skip"` | all-NaN rows (untested combinations) are dropped by `ContextWGCNA` (partly-NaN rows still raise there) and not scored by `detect_dominant` (metrics NaN, never dominant, not counted in `n_contexts`), which ignores other NaN entries (magnitude scaled up to all genes, `frac_genes_extreme` over the observed genes) |
 | | a number, e.g. `0` | fill NaN with it (`0` = "no change") |
 | `max_abs` | `"auto"` (default) | cutoff from the data: the gap below a separate cluster of large \|LFC\| that occurs in most rows (see below); nothing masked if there is none |
 | | `None` | no masking |
 | | e.g. `15` | \|LFC\| > 15 (and ±inf) are missing measurements: ignored per entry like NaN, or filled with `nan` if it is a number. They never trigger `nan="raise"`. In `ContextWGCNA` they are set to 0. |
 | `max_artifact_z` | `None` (default) | keep all rows |
-| | e.g. `3` | rows with unusually many masked genes for their context are not scored (below) |
+| | e.g. `3` | rows with unusually many masked genes for their context are left out (below) |
 | `clip` | `None` (default) | no clipping |
 | | `3` | clip to [−3, 3] |
 | | `(-2, 4)` | clip to [lo, hi] |
@@ -349,7 +450,61 @@ Clipping keeps a few unstable values (e.g. LFCs capped at ±10) from dominating 
 `detect_dominant` and `ContextWGCNA` each compute a percentile clip on their own input, so after
 removing dominant rows the network's `p95` cutoff can be slightly lower.
 
-**Rule.** Each LFC profile (one condition in one system) is compared with the other profiles of the
+### Using expression data instead of LFC
+Nothing in the core method needs fold changes: per-context similarities, top-n selection, the
+context TOM, modules and the submodule split work the same on a log-normalised or variance-stabilised
+expression matrix (e.g. DESeq2 `vst`, log-CPM), rows = samples, columns = genes. Correlations are
+computed within each context, so each context's own mean is removed and baseline differences
+between contexts do not create co-expression.
+
+Two parts assume LFC, where 0 means "no change":
+
+| Part | Why it assumes LFC | With expression data |
+|---|---|---|
+| `similarity="cosine"` | uncentred: rewards genes moving away from 0 together | 0 has no meaning, so cosine mostly reflects expression level. Use `pearson`, `spearman` or `bicor`. |
+| `detect_dominant` | a profile's size is its distance from 0 (sum of squares) | it would flag highly expressed samples. Centre each gene within its context first (`X - X.groupby(obs[context_col]).transform("mean")`), or skip this step. |
+
+Each context still needs enough samples for a stable correlation (`min_obs`, default 10; 15–20 or
+more is better). With LFC from a 300-condition design this is easy; with plain expression data a
+context is often only a few replicates, too few to use as a context on their own.
+
+---
+
+## 4. Dominant conditions — `detect_dominant`, `drop_dominant`
+
+Sometimes one condition (or a few) produces far larger changes than the rest, in **most** genes.
+With Pearson correlation, that single condition dominates: its responders form giant blocks that
+absorb and break up the real modules. Robust correlations (Spearman, bicor) would neutralise it,
+but they also erase genuine programmes that respond in only a few conditions, which is exactly the
+local structure this method is for. The recommended approach is therefore: **flag those LFC profiles,
+remove them, keep Pearson, and analyse the flagged conditions separately.**
+
+Evidence from simulation (1,000 genes, 20 systems × 300 conditions; F1 of planted-module recovery):
+
+| | global module | local L1 | local L2 | 5-condition programme |
+|---|---|---|---|---|
+| three dominant conditions kept (Pearson) | 0.83 | 0.60 | 0.26 | 0.11 |
+| Spearman or bicor instead (one dominant condition) | ✓ | ✓ | ✓ | **0.0** |
+| **flagged profiles removed (Pearson)** | **0.98** | **1.0** | **1.0** | **1.0** |
+
+```python
+from ctxwgcna import detect_dominant, drop_dominant
+
+rows, summary = detect_dominant(lfc, obs, context_col="system", condition_col="condition")
+print(summary.head(10))          # per condition: in how many systems it is dominant
+lfc_clean, obs_clean = drop_dominant(lfc, obs, rows)
+cw = ContextWGCNA(lfc_clean, obs_clean, context_col="system")
+
+# with AnnData: drop_dominant returns a filtered copy
+rows, summary = detect_dominant(adata, layer="log2fc")
+adata_clean = drop_dominant(adata, rows=rows)
+```
+
+The value preparation options (`nan`, `max_abs`, `max_artifact_z`, `clip`) are described in
+[Missing values and implausible LFCs](#missing-values-and-implausible-lfcs).
+
+### Rule
+Each LFC profile (one condition in one system) is compared with the other profiles of the
 **same system**. So a condition can be dominant in some systems only, and only those rows are removed;
 systems may then have different numbers of conditions, which the method handles. A profile is
 flagged only if it passes all three criteria. A profile's **magnitude** is its sum of squared LFC
@@ -361,7 +516,11 @@ over all genes (how much changes in total); the names below build on that word.
 | unusual | `min_magnitude_z` (4) | robust outlier among the system's profiles (log2 of the ratio, median/MAD), so systems with naturally wide spreads don't get many flags |
 | broad | `min_frac_genes_extreme` (0.10) | ≥ 10% of its genes are extreme: their LFC is ≥ `gene_extreme_z` (5) robust SDs from that gene's median LFC in the system |
 
-All parameters of `detect_dominant(lfc, obs=None, ...)`:
+Breadth is what separates a harmful profile from a real few-condition programme. In simulation, a
+programme's strongest profiles reached 7× the median magnitude but moved only 6% of genes (kept),
+while dominant conditions moved 22–60% of genes (flagged).
+
+### Parameters — `detect_dominant(lfc, obs=None, ...)`
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -380,10 +539,6 @@ All parameters of `detect_dominant(lfc, obs=None, ...)`:
 The old names (`min_fold`, `min_z`, `min_gene_frac`, `extreme_z`, `max_frac`, `label_col`) still
 work, with a warning.
 
-Breadth is what separates a harmful profile from a real few-condition programme. In simulation, a
-programme's strongest profiles reached 7× the median magnitude but moved only 6% of genes (kept),
-while dominant conditions moved 22–60% of genes (flagged).
-
 **Several dominant conditions are allowed, but they must stay few.** `max_frac_flagged` (default 0.05)
 caps the flagged fraction per system at 5% of its profiles. The median/MAD reference is only valid
 when dominant profiles are a small minority. If more profiles pass, the strongest 5% are
@@ -391,7 +546,7 @@ flagged, the rest are marked `candidate`, and a **warning** is printed. "Dominan
 is a continuum, not a few outliers, and removing rows is then the wrong tool: inspect the table,
 raise `min_magnitude_ratio`, or reconsider.
 
-Outputs:
+### Outputs
 
 | Table | Column | Meaning |
 |---|---|---|
@@ -416,6 +571,7 @@ the same way as their DEG counts do: 100 genes at LFC 1 add as much as one gene 
 defaults (e.g. `gene_extreme_z=1`, which a third of all genes pass in an ordinary profile) turns the
 test into a ranking: `max_frac_flagged` then simply flags the largest profiles of every context.
 
+### After flagging
 **Analysing the flagged conditions separately.** One condition is a single data point per system,
 so it has no correlation structure of its own. Take its responder genes (`|LFC|` large, ideally
 consistent across systems), then test which modules or submodules are enriched for them, or score
@@ -426,135 +582,22 @@ may have chosen most of them. Select genes on the remaining conditions instead.
 
 ---
 
-## 3. Running it
+## 5. `ContextWGCNA` reference
 
-### 3a. Python API
+| Method | Step | Main arguments | Sets |
+|---|---|---|---|
+| `ContextWGCNA(data, obs, ...)` | prepare values, build contexts | all settings below | `.data`, `.obs`, `.blocks`, `.preprocessing` |
+| `compute_support()` | per-context similarity, top-n, calibration | (constructor settings) | `.support` |
+| `pick_power(powers, r2_cut, mean_cut)` | scale-free fit | `r2_cut=0.85`, `mean_cut=100` | `.sft`, `.power` |
+| `build_network(power)` | adjacency, context TOM | `power` | `.adjacency`, `.tom` |
+| `find_modules(min_module_size, deep_split)` | hard modules | `min_module_size=30`, `deep_split=2` | `.modules`, `.linkage` |
+| `split_modules(t_thr, jaccard_cut, ...)` | overlapping submodules | see below | `.submodules`, `.memberships` |
+| `run(power, min_module_size, deep_split)` | `compute_support` → `build_network` → `find_modules` | | |
+| `module_context_profile()`, `module_context_coherence()`, `context_eigengenes(module, contexts)`, `membership_matrix()` | interpretation (section 6) | | |
 
-```python
-import pandas as pd
-from ctxwgcna import ContextWGCNA, global_wgcna, detect_dominant, drop_dominant
-
-lfc = pd.read_csv("lfc.csv", index_col=0)    # observations x genes
-obs = pd.read_csv("obs.csv", index_col=0)    # same index; has a 'system' column
-
-rows, summary = detect_dominant(lfc, obs, context_col="system")   # section 2
-lfc, obs = drop_dominant(lfc, obs, rows)
-
-cw = ContextWGCNA(lfc, obs, context_col="system")   # defaults: pearson, top_n=3, signed, matched TOM
-# or from AnnData: ContextWGCNA(adata, layer="log2fc", genes="highly_variable", context_col="system")
-
-cw.compute_support()                 # steps 1-4
-cw.pick_power()                      # scale-free table -> cw.sft, cw.power
-print(cw.sft)                        # inspect! (see "Choosing the power")
-cw.build_network(power=12)           # adjacency + context-restricted TOM
-modules = cw.find_modules(min_module_size=30)
-subs, mem = cw.split_modules()       # overlapping, context-defined submodules
-
-# interpretation
-cw.module_context_profile()          # which contexts carry each module
-cw.module_context_coherence()        # direct per-context check of each module
-cw.membership_matrix()               # genes x submodules (bool)
-cw.support.pair_profile("GeneA", "GeneB")   # one pair's support in every context (needs stored t)
-cw.support.pair("GeneA", "GeneB")           # its top-n supporting contexts (signed t, rank_stat)
-cw.context_eigengenes("M3", contexts=["sysA", "sysB"])   # eigengene within supporting contexts
-
-# baseline for comparison: standard WGCNA on pooled data
-glob_modules, glob_power = global_wgcna(lfc, power=12, min_module_size=30)
-```
-
-`cw.run(power=None, min_module_size=30)` runs `compute_support → pick_power → build_network →
-find_modules` in one call (the power is picked unless given). Each step can be re-run alone, e.g.
-`build_network(power=16)` then `find_modules()` without recomputing the support. A step called
-before its prerequisites runs them first (e.g. `build_network()` on a fresh object computes the
-support and picks the power). `split_modules()` needs `find_modules()` first, and
-`membership_matrix()` needs `split_modules()`.
-
-#### Lower-level functions
-The steps are also available as plain functions, e.g. for custom pipelines:
-
-| Function | Module | What it does |
-|---|---|---|
-| `as_frames(data, obs, layer, genes)` | `ctxwgcna.data` | DataFrame or AnnData input → (`data`, `obs`) DataFrames |
-| `make_context_blocks(data, obs, context_col)` | `ctxwgcna.data` | validate input, split rows into `ContextBlock`s |
-| `similarity_matrix(X, method)`, `fisher_z(S)` | `ctxwgcna.similarity` | one context's gene-gene similarity, Fisher z |
-| `standardized_z(X, method)`, `z_scale(n)` | `ctxwgcna.similarity` | t = arctanh(s)·√(n − 3) for one context; √(n − 3) |
-| `compute_support(blocks, ...)` | `ctxwgcna.support` | top-n contexts per pair and the calibrated summary (`ContextSupport`) |
-| `soft_context_weights(t, selection)` | `ctxwgcna.support` | per-edge soft context weights from (K, …) per-context t |
-| `adjacency_from_r`, `scale_free_table`, `pick_power`, `context_tom` | `ctxwgcna.network` | adjacency, power choice, context-restricted TOM (`DEFAULT_POWERS`: candidate powers) |
-| `detect_modules(tom, genes)`, `module_indices(modules)` | `ctxwgcna.modules` | tree cut; `{module: gene positions}` (M0 excluded) |
-| `module_context_profile`, `module_context_profile_soft`, `module_context_coherence`, `eigengene` | `ctxwgcna.modules` | module summaries |
-| `split_module(t_ctx)`, `split_modules(modules, get_t, contexts)` | `ctxwgcna.submodules` | overlapping split of one / every module |
-| `detect_dominant`, `drop_dominant` | `ctxwgcna.dominance` | dominant LFC profiles |
-| `simulate_lfc(...)` | `ctxwgcna.simulate` | synthetic LFC data with known modules |
-
-The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_blocks`, `compute_support`,
-`similarity_matrix`, `fisher_z`, `adjacency_from_r`, `context_tom`, `scale_free_table`,
-`pick_power`, `detect_dominant`, `drop_dominant`) can be imported directly from `ctxwgcna`.
-
-### 3b. Command line
-
-`scripts/run_ctxwgcna.py` runs the whole pipeline (optionally with the dominance step) and writes
-every result to a directory, e.g. for batch jobs:
-
-```bash
-python scripts/run_ctxwgcna.py \
-    --data lfc.csv --obs obs.csv \
-    --context-col system \
-    --exclude-dominant \
-    --outdir results/ \
-    --global-baseline
-```
-
-From an AnnData file instead:
-
-```bash
-python scripts/run_ctxwgcna.py \
-    --h5ad data.h5ad --layer log2fc --var-subset highly_variable \
-    --context-col system --exclude-dominant --outdir results/
-```
-
-Every flag is the parameter name with dashes (`--min-module-size` = `min_module_size`); `-h` lists
-them. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
-The flags that differ:
-
-| Flag | Python equivalent |
-|---|---|
-| `--data`, `--obs`; `--transpose` | the input tables; `lfc.T` |
-| `--h5ad`, `--layer`, `--var-subset` | AnnData input with `layer`, `genes` (a boolean `.var` column) |
-| `--max-abs none` | `max_abs=None` |
-| `--clip=-2,4` | `clip=(-2, 4)` |
-| `--detect-dominant` | run `detect_dominant` and write its tables |
-| `--exclude-dominant` | also `drop_dominant` before the network |
-| `--dominant-condition-col`, `--dominant-min-magnitude-ratio`, `--dominant-min-magnitude-z`, `--dominant-min-frac-genes-extreme`, `--dominant-gene-extreme-z`, `--dominant-max-frac-flagged` | the `detect_dominant` parameters of the same name without `dominant_` |
-| `--nan`, `--max-abs`, `--max-artifact-z`, `--clip` | passed to both `detect_dominant` and `ContextWGCNA` |
-| `--dominant-nan`, `--dominant-max-abs`, `--dominant-max-artifact-z`, `--dominant-clip` | override them for `detect_dominant` only |
-| `--min-submodule-size` | `split_modules(min_size=...)` |
-| `--no-split` | skip `split_modules` |
-| `--global-baseline` | also run `global_wgcna` |
-| `--save-matrices` | save summary r, adjacency and TOM |
-
-The old dominance flags (`--dominant-label-col`, `--dominant-min-fold`, `--dominant-min-z`,
-`--dominant-min-gene-frac`, `--dominant-max-frac`) are still accepted.
-
-Outputs in `results/`:
-
-| File | Content |
-|---|---|
-| `modules.csv` | gene → hard module (`M1`, `M2`, …; `M0` = unassigned) |
-| `submodules.csv` | one row per submodule: parent, supporting contexts, size, overlap |
-| `memberships.csv` | long table gene → submodule (a gene can appear several times) |
-| `membership_matrix.csv` | genes × submodules, 0/1 |
-| `module_context_profile.csv` | modules × contexts: share of each module's connectivity supported by each context |
-| `module_context_coherence.csv` | modules × contexts: mean within-module similarity in each context |
-| `soft_threshold.csv` | scale-free fit and connectivity for each candidate power (not written when `--power` is given) |
-| `global_modules.csv` | standard pooled WGCNA modules (with `--global-baseline`) |
-| `matrices.npz` | summary r, adjacency, TOM (with `--save-matrices`) |
-| `dominance_rows.csv`, `dominance_summary.csv` | dominant LFC profiles (with `--detect-dominant` / `--exclude-dominant`) |
-| `run_config.json` | all options, the chosen power, number of removed dominant profiles, runtime |
-
----
-
-## 4. Parameters
+`global_wgcna(data, power, min_module_size, ...)` is the pooled baseline; it takes `similarity`,
+`network_type`, `deep_split`, `r2_cut`, `mean_cut`, `layer`, `genes`, `nan`, `clip` and `max_abs`
+as here, and returns (module labels, power).
 
 ### Contexts — `ContextWGCNA(...)`
 | Parameter | Default | Meaning / when to change |
@@ -564,7 +607,7 @@ Outputs in `results/`:
 | `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
 | `nan` | `"raise"` | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
 | `max_abs` | `"auto"` | Treat \|value\| > `max_abs` as missing (GLM LFCs of ~30 from zero counts): `"auto"` takes the cutoff from a separate, scattered cluster of large values (none: nothing masked), a number (e.g. 15) fixes it, `None` turns it off; set to 0 (or to `nan` if it is a number), before clipping. |
-| `max_artifact_z` | `None` | Leave out rows with unusually many masked genes for their context (`artifact_z` > this, e.g. 3; see section 3). |
+| `max_artifact_z` | `None` | Leave out rows with unusually many masked genes for their context (`artifact_z` > this, e.g. 3; see section 4). |
 | `clip` | `None` | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. `.data` holds the clipped data, `.preprocessing` what was done. |
 | `context_col` | `"system"` | Column of `obs` that defines contexts. |
 | `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
@@ -654,9 +697,31 @@ the other submodule members, over the submodule's contexts; a membership strengt
 | `chunk_mb` | `128` | Memory per chunk while streaming over contexts. |
 | `seed` | `0` | For permutation / Monte-Carlo calibration. |
 
+### Lower-level functions
+The steps are also available as plain functions, e.g. for custom pipelines:
+
+| Function | Module | What it does |
+|---|---|---|
+| `as_frames(data, obs, layer, genes)` | `ctxwgcna.data` | DataFrame or AnnData input → (`data`, `obs`) DataFrames |
+| `make_context_blocks(data, obs, context_col)` | `ctxwgcna.data` | validate input, split rows into `ContextBlock`s |
+| `similarity_matrix(X, method)`, `fisher_z(S)` | `ctxwgcna.similarity` | one context's gene-gene similarity, Fisher z |
+| `standardized_z(X, method)`, `z_scale(n)` | `ctxwgcna.similarity` | t = arctanh(s)·√(n − 3) for one context; √(n − 3) |
+| `compute_support(blocks, ...)` | `ctxwgcna.support` | top-n contexts per pair and the calibrated summary (`ContextSupport`) |
+| `soft_context_weights(t, selection)` | `ctxwgcna.support` | per-edge soft context weights from (K, …) per-context t |
+| `adjacency_from_r`, `scale_free_table`, `pick_power`, `context_tom` | `ctxwgcna.network` | adjacency, power choice, context-restricted TOM (`DEFAULT_POWERS`: candidate powers) |
+| `detect_modules(tom, genes)`, `module_indices(modules)` | `ctxwgcna.modules` | tree cut; `{module: gene positions}` (M0 excluded) |
+| `module_context_profile`, `module_context_profile_soft`, `module_context_coherence`, `eigengene` | `ctxwgcna.modules` | module summaries |
+| `split_module(t_ctx)`, `split_modules(modules, get_t, contexts)` | `ctxwgcna.submodules` | overlapping split of one / every module |
+| `detect_dominant`, `drop_dominant` | `ctxwgcna.dominance` | dominant LFC profiles |
+| `simulate_lfc(...)` | `ctxwgcna.simulate` | synthetic LFC data with known modules |
+
+The most used ones (`ContextWGCNA`, `global_wgcna`, `as_frames`, `make_context_blocks`, `compute_support`,
+`similarity_matrix`, `fisher_z`, `adjacency_from_r`, `context_tom`, `scale_free_table`,
+`pick_power`, `detect_dominant`, `drop_dominant`) can be imported directly from `ctxwgcna`.
+
 ---
 
-## 5. Interpreting the results
+## 6. Interpreting the results
 
 - **`module_context_profile()`** (rows sum to 1): how much of each module's internal connectivity
   each context supports, from soft per-edge context weights. Compare with the uniform value 1/K:
@@ -677,34 +742,70 @@ the other submodule members, over the submodule's contexts; a membership strengt
 
 ---
 
-## 6. Recommended first run on real data
+## 7. Command line
 
-1. Check for dominant conditions first: `rows, summary = detect_dominant(lfc, obs, ...)` and read
-   `summary`. If a few conditions are flagged (in some or all systems), continue with
-   `drop_dominant(lfc, obs, rows)`. If the cap warning appears, look at the `magnitude_ratio`
-   distribution before removing anything.
-2. Run `ContextWGCNA(...).run()` with defaults, and `global_wgcna(...)` for comparison. Check how
-   many modules are found and their context profiles. Global modules should look similar in both
-   runs; local modules should appear only in the context run.
-3. Check the power: inspect `cw.sft`, then `build_network(power=...)` and `find_modules()` at 2–3
-   powers and keep conclusions that are stable.
-4. Check the calibration: rerun once with `calibrate="permutation"`. `cw.support.bias` should agree
-   closely with `analytic` for pearson (it did in simulation: 0.0852 both).
-5. Run a negative control: permute each gene within each context. This should give few or no
-   modules and no submodules (simulation: all 1,000 genes unassigned).
-   ```python
-   import numpy as np
-   rng = np.random.default_rng(0)
-   lfc_null = lfc.copy()
-   for ctx, rows in obs.groupby("system").groups.items():
-       lfc_null.loc[rows] = rng.permuted(lfc.loc[rows].to_numpy(), axis=0)
-   ContextWGCNA(lfc_null, obs).run(power=12)
-   ```
-6. Check sensitivity: vary `top_n` (2 vs 3) and `t_thr` / `jaccard_cut` for the split.
+`scripts/run_ctxwgcna.py` runs the whole pipeline (optionally with the dominance step) and writes
+every result to a directory, e.g. for batch jobs:
+
+```bash
+python scripts/run_ctxwgcna.py \
+    --data lfc.csv --obs obs.csv \
+    --context-col system \
+    --exclude-dominant \
+    --outdir results/ \
+    --global-baseline
+```
+
+From an AnnData file instead:
+
+```bash
+python scripts/run_ctxwgcna.py \
+    --h5ad data.h5ad --layer log2fc --var-subset highly_variable \
+    --context-col system --exclude-dominant --outdir results/
+```
+
+Every flag is the parameter name with dashes (`--min-module-size` = `min_module_size`); `-h` lists
+them. Files are read as CSV, or TSV if the name ends in `.tsv`/`.txt` (override with `--sep`).
+The flags that differ:
+
+| Flag | Python equivalent |
+|---|---|
+| `--data`, `--obs`; `--transpose` | the input tables; `lfc.T` |
+| `--h5ad`, `--layer`, `--var-subset` | AnnData input with `layer`, `genes` (a boolean `.var` column) |
+| `--max-abs none` | `max_abs=None` |
+| `--clip=-2,4` | `clip=(-2, 4)` |
+| `--detect-dominant` | run `detect_dominant` and write its tables |
+| `--exclude-dominant` | also `drop_dominant` before the network |
+| `--dominant-condition-col`, `--dominant-min-magnitude-ratio`, `--dominant-min-magnitude-z`, `--dominant-min-frac-genes-extreme`, `--dominant-gene-extreme-z`, `--dominant-max-frac-flagged` | the `detect_dominant` parameters of the same name without `dominant_` |
+| `--nan`, `--max-abs`, `--max-artifact-z`, `--clip` | passed to both `detect_dominant` and `ContextWGCNA` |
+| `--dominant-nan`, `--dominant-max-abs`, `--dominant-max-artifact-z`, `--dominant-clip` | override them for `detect_dominant` only |
+| `--min-submodule-size` | `split_modules(min_size=...)` |
+| `--no-split` | skip `split_modules` |
+| `--global-baseline` | also run `global_wgcna` |
+| `--save-matrices` | save summary r, adjacency and TOM |
+
+The old dominance flags (`--dominant-label-col`, `--dominant-min-fold`, `--dominant-min-z`,
+`--dominant-min-gene-frac`, `--dominant-max-frac`) are still accepted.
+
+Outputs in `results/`:
+
+| File | Content |
+|---|---|
+| `modules.csv` | gene → hard module (`M1`, `M2`, …; `M0` = unassigned) |
+| `submodules.csv` | one row per submodule: parent, supporting contexts, size, overlap |
+| `memberships.csv` | long table gene → submodule (a gene can appear several times) |
+| `membership_matrix.csv` | genes × submodules, 0/1 |
+| `module_context_profile.csv` | modules × contexts: share of each module's connectivity supported by each context |
+| `module_context_coherence.csv` | modules × contexts: mean within-module similarity in each context |
+| `soft_threshold.csv` | scale-free fit and connectivity for each candidate power (not written when `--power` is given) |
+| `global_modules.csv` | standard pooled WGCNA modules (with `--global-baseline`) |
+| `matrices.npz` | summary r, adjacency, TOM (with `--save-matrices`) |
+| `dominance_rows.csv`, `dominance_summary.csv` | dominant LFC profiles (with `--detect-dominant` / `--exclude-dominant`) |
+| `run_config.json` | all options, the chosen power, number of removed dominant profiles, runtime |
 
 ---
 
-## 7. Resources
+## 8. Resources
 
 Measured on simulated data (1,000 genes, 20 systems × 300 conditions, laptop):
 
@@ -725,7 +826,7 @@ Scaling (G genes, K contexts, n top-n):
 
 ---
 
-## 8. Method details
+## 9. Method details
 
 For context c with n_c observations and similarity s_c(i, j):
 
@@ -745,11 +846,11 @@ For context c with n_c observations and similarity s_c(i, j):
 - Modules: average-linkage clustering of 1 − TOM, then dynamic hybrid tree cut.
 - Soft context weight of an edge: w_ij^k = t_k⁺ / Σ_k t_k⁺ (|t_k| for unsigned networks). This is flat
   for globally co-expressed pairs and peaked for local ones.
-- Submodules: see section 4.
+- Submodules: see section 5.
 
 ---
 
-## 9. Known limitations
+## 10. Known limitations
 
 - **Hard modules first.** A submodule can only contain genes from its parent module; genes in
   other modules or unassigned genes are not candidates for extra membership.
@@ -760,12 +861,12 @@ For context c with n_c observations and similarity s_c(i, j):
 - **No module merging step.** Standard WGCNA merges modules with correlated pooled eigengenes,
   which would wrongly merge or miss local modules, so it is not applied.
 - **No PAM stage.** Unassigned genes are not reassigned to the nearest module.
-- **Automatic power** can be suboptimal (section 4); check several powers.
+- **Automatic power** can be suboptimal (section 5); check several powers.
 - **Validation** so far is on simulated data only.
 
 ---
 
-## 10. Project layout
+## 11. Project layout
 
 ```
 src/ctxwgcna/

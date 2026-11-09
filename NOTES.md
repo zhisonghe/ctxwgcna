@@ -190,3 +190,15 @@ min_frac_genes_extreme, extreme_z -> gene_extreme_z, max_frac -> max_frac_flagge
 magnitude_z, n_extreme / frac_extreme -> n_genes_extreme / frac_genes_extreme, summary max_fold ->
 max_magnitude_ratio etc.; new columns frac_masked, artifact_z, artifact_excluded,
 n_artifact_excluded, median_frac_masked. CLI global baseline now uses the context network's rows.
+
+## Step re-runs clear only downstream results; README walkthrough first (2026-11-09)
+ContextWGCNA tracks which settings each result was made with. Re-running a step clears only later
+results (support -> sft / picked power -> adjacency+TOM -> modules -> submodules); a power given by
+the user survives a new support, a picked one is re-picked. Changing a stored setting
+(cw.top_n = 2, cw.tom_mode = ...) is noticed: the next step recomputes the stale support / TOM.
+split_modules and module_context_profile raise if modules were built with since-changed settings.
+`selection` is now a property that follows network_type unless set. Previously find_modules()
+silently reused a TOM built on an old support.
+README reordered for notebook use: installation -> step-by-step walkthrough (with re-run table and
+checks) -> input data (incl. value preparation) -> dominance -> ContextWGCNA reference (method
+table, parameters, lower-level functions) -> interpretation -> command line -> resources/method.

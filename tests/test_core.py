@@ -726,3 +726,43 @@ def test_cli_h5ad(adata_example, tmp_path):
     mod.main(["--h5ad", str(path), "--layer", "log2fc", "--var-subset", "keep", "--power", "12",
               "--min-module-size", "20", "--no-split", "--outdir", str(out)])
     assert len(pd.read_csv(out / "modules.csv", index_col=0)) == 150
+
+
+def test_steps_clear_only_downstream_results():
+    fc, obs, _ = simulate_lfc(n_genes=320, n_systems=8, n_conditions=30, seed=3)
+    cw = ContextWGCNA(fc, obs, top_n=2, calibrate="none")
+    cw.run(power=12, min_module_size=10)
+    cw.split_modules()
+    support, tom, modules = cw.support, cw.tom, cw.modules
+
+    cw.split_modules(t_thr=4)                       # submodules only
+    assert cw.modules is modules and cw.tom is tom
+    cw.find_modules(min_module_size=15)             # modules: TOM kept, submodules cleared
+    assert cw.tom is tom and cw.submodules is None
+    cw.split_modules()
+    cw.build_network(power=8)                       # network: support kept, modules cleared
+    assert cw.support is support and cw.modules is None and cw.submodules is None
+    assert cw.power == 8
+
+    cw.pick_power()                                 # picked power: network cleared, support kept
+    assert cw.support is support and cw.tom is None and cw.sft is not None
+    cw.build_network(power=12)
+    cw.find_modules(min_module_size=10)
+    cw.compute_support()                            # new support: everything after it cleared
+    assert cw.tom is None and cw.modules is None and cw.sft is None
+    assert cw.power == 12                           # a power given by the user is kept
+
+    # changed settings are noticed: the stale support / TOM is rebuilt by the next step
+    cw.find_modules(min_module_size=10)
+    old_support = cw.support
+    cw.top_n = 3
+    with pytest.raises(ValueError, match="settings changed"):
+        cw.split_modules()
+    cw.find_modules(min_module_size=10)
+    assert cw.support is not old_support and cw.support.top_n == 3
+    tom = cw.tom
+    cw.tom_mode = "standard"
+    cw.find_modules(min_module_size=10)
+    assert cw.tom is not tom and cw.support.top_n == 3
+    cw.network_type = "unsigned"                    # selection follows network_type
+    assert cw.selection == "absolute"

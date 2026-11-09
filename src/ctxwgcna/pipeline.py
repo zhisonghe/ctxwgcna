@@ -24,6 +24,9 @@ class ContextWGCNA:
     Typical use:  cw = ContextWGCNA(data, obs); cw.run(); cw.split_modules()
              or:  cw = ContextWGCNA(adata, layer="log2fc", genes="highly_variable")
     Each step can also be called on its own; missing earlier steps are run automatically.
+    Re-running a step clears only the results that depend on it (later steps), never earlier ones.
+    Settings stored on the object (e.g. cw.top_n = 2) may be changed between steps: a later step
+    notices that an earlier result was made with other settings and recomputes it.
 
     :param data: the data: a DataFrame (rows = observations, i.e. LFC profiles or samples; columns =
         genes), or an AnnData object (observations x genes).
@@ -51,7 +54,7 @@ class ContextWGCNA:
     :param max_artifact_z: leave out rows with unusually many masked genes for their context
         (artifact_z > max_artifact_z, as in detect_dominant; e.g. 3). None (default): keep all.
     .data / .obs hold the data after these steps; .preprocessing records them.
-    See README.md section 4 for all parameters.
+    See README.md section 5 for all parameters (section 2 for a walkthrough).
     """
 
     def __init__(self, data, obs=None, context_col="system", contexts=None, similarity="pearson", top_n=3,
@@ -73,7 +76,7 @@ class ContextWGCNA:
         self.similarity = similarity
         self.top_n = top_n
         self.network_type = network_type
-        self.selection = selection or ("absolute" if network_type == "unsigned" else "positive")
+        self._selection = selection  # None: follows network_type (see the selection property)
         self.weighting, self.calibrate, self.n_perm = weighting, calibrate, n_perm
         self.tom_mode, self.support_min_t = tom_mode, support_min_t
         self.seed, self.chunk_mb = seed, chunk_mb
@@ -91,6 +94,56 @@ class ContextWGCNA:
         self._min_module_size = None
         self.submodules = None
         self.memberships = None
+        self._power_picked = False  # True if .power came from pick_power (then it follows the support)
+        self._support_used = None  # settings the current support was computed with
+        self._network_used = None  # settings the current adjacency / TOM was built with
+
+    # -- settings and the dependency chain -------------------------------------------------------
+    _SUPPORT_SETTINGS = ("similarity", "top_n", "selection", "weighting", "calibrate", "n_perm", "seed",
+                         "store_context_t", "store_max_mb")
+    _NETWORK_SETTINGS = ("power", "network_type", "tom_mode", "support_min_t")
+    _STAGES = ("support", "power", "network", "modules", "submodules")
+
+    @property
+    def selection(self):
+        """Top-n ranking: 'positive' (signed t) or 'absolute' (|t|); by default from network_type."""
+        if self._selection is not None:
+            return self._selection
+        return "absolute" if self.network_type == "unsigned" else "positive"
+
+    @selection.setter
+    def selection(self, value):
+        self._selection = value
+
+    def _settings(self, names):
+        return tuple(getattr(self, n) for n in names)
+
+    def _support_stale(self):
+        return self.support is None or self._support_used != self._settings(self._SUPPORT_SETTINGS)
+
+    def _network_stale(self):
+        return (self.tom is None or self._support_stale()
+                or self._network_used != self._settings(self._NETWORK_SETTINGS))
+
+    def _clear_after(self, stage):
+        """Drop the results of every step after `stage` (results of `stage` and earlier are kept)."""
+        later = self._STAGES[self._STAGES.index(stage) + 1:]
+        if "power" in later:
+            self.sft = None
+            if self._power_picked:  # a picked power belongs to the old support; a given one is kept
+                self.power, self._power_picked = None, False
+        if "network" in later:
+            self.adjacency = self.tom = self._network_used = None
+        if "modules" in later:
+            self.modules = self.linkage = self._min_module_size = None
+        if "submodules" in later:
+            self.submodules = self.memberships = None
+
+    def _require_current(self, what):
+        if self.modules is None:
+            raise ValueError(f"run find_modules() before {what}")
+        if self._network_stale():
+            raise ValueError(f"settings changed since find_modules(); re-run find_modules() before {what}")
 
     # -- steps -----------------------------------------------------------------------------------
     def compute_support(self):
@@ -100,15 +153,19 @@ class ContextWGCNA:
             weighting=self.weighting, calibrate=self.calibrate, n_perm=self.n_perm,
             chunk_mb=self.chunk_mb, seed=self.seed, genes=self.genes,
             store_context_t=self.store_context_t, store_max_mb=self.store_max_mb)
+        self._support_used = self._settings(self._SUPPORT_SETTINGS)
+        self._clear_after("support")
         return self.support
 
     def pick_power(self, powers=None, r2_cut=0.85, mean_cut=100):
         """Choose the soft-threshold power by scale-free fit; sets .power and returns the fit table."""
-        if self.support is None:
+        if self._support_stale():
             self.compute_support()
         powers = _net.DEFAULT_POWERS if powers is None else powers
         self.sft = _net.scale_free_table(self.support.r, powers, self.network_type)
+        self._clear_after("power")
         self.power, found = _net.pick_power(self.sft, r2_cut, mean_cut)
+        self._power_picked = True
         if not found:
             print(f"No power reached signed R^2 >= {r2_cut}; using best-fitting power {self.power}. "
                   "Inspect .sft before trusting it.")
@@ -117,20 +174,23 @@ class ContextWGCNA:
     def build_network(self, power=None):
         """Adjacency and context-restricted TOM (power: given, previously chosen, or picked now)."""
         if power is not None:
-            self.power = power
-        if self.support is None:
+            self.power, self._power_picked = power, False
+        if self._support_stale():
             self.compute_support()
         if self.power is None:
             self.pick_power()
         self.adjacency = _net.adjacency_from_r(self.support.r, self.power, self.network_type)
         self.tom = _net.context_tom(self.adjacency, self.support, mode=self.tom_mode,
                                     min_t=self.support_min_t)
+        self._network_used = self._settings(self._NETWORK_SETTINGS)
+        self._clear_after("network")
         return self.tom
 
     def find_modules(self, min_module_size=30, deep_split=2, **cutree_kwargs):
         """Hard (non-overlapping) modules by dynamic hybrid tree cut of 1 - TOM."""
-        if self.tom is None:
+        if self._network_stale():
             self.build_network()
+        self._clear_after("network")
         self._min_module_size = min_module_size
         self.modules, self.linkage = _mod.detect_modules(
             self.tom, self.genes, min_module_size=min_module_size, deep_split=deep_split, **cutree_kwargs)
@@ -139,8 +199,9 @@ class ContextWGCNA:
     def run(self, power=None, min_module_size=30, deep_split=2, **cutree_kwargs):
         """All steps from scratch; the power is picked by scale-free fit unless given."""
         self.compute_support()
-        self.power = power
-        self.build_network()
+        if power is None:
+            self.power, self._power_picked = None, False
+        self.build_network(power)
         return self.find_modules(min_module_size=min_module_size, deep_split=deep_split, **cutree_kwargs)
 
     # -- second level: overlapping submodules -----------------------------------------------------
@@ -165,8 +226,8 @@ class ContextWGCNA:
         find_modules; min_partners to ceil(min_size / 2). Sets and returns
         (self.submodules, self.memberships).
         """
-        if self.modules is None:
-            raise ValueError("run find_modules() first")
+        self._require_current("split_modules()")
+        self._clear_after("modules")
         if self.similarity == "cosine":
             print("Warning: split significance (t >= t_thr) assumes a zero null mean, which does not hold "
                   "for cosine similarity; raise t_thr or interpret with care.")
@@ -192,6 +253,7 @@ class ContextWGCNA:
         soft=True: adjacency-weighted mean of the per-edge soft context weights (all contexts).
         soft=False: adjacency-weighted share of the edges' top-n supporting contexts.
         """
+        self._require_current("module_context_profile()")
         if not soft:
             return _mod.module_context_profile(self.adjacency, self.support, self.modules, self.support_min_t)
         prof = _mod.module_context_profile_soft(self.adjacency, self._context_weights, self.modules)
