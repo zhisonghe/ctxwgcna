@@ -609,83 +609,144 @@ may have chosen most of them. Select genes on the remaining conditions instead.
 
 ## 5. `ContextWGCNA` reference
 
-| Method | Step | Main arguments | Sets |
+Every parameter belongs to exactly one function below. Most settings go to the **constructor**:
+it prepares the data, stores the rest as attributes (`cw.top_n`, `cw.tom_mode`, …), and each step
+reads the ones it needs (column "Used by"). The step methods only take the arguments listed under
+them.
+
+| Function | Its own arguments | Uses from the constructor | Sets |
 |---|---|---|---|
-| `ContextWGCNA(data, obs, ...)` | prepare values, build contexts | all settings below | `.data`, `.obs`, `.blocks`, `.preprocessing` |
-| `compute_support()` | per-context similarity, top-n, calibration | (constructor settings) | `.support` |
-| `pick_power(powers, r2_cut, mean_cut)` | scale-free fit | `r2_cut=0.85`, `mean_cut=100` | `.sft`, `.power` |
-| `build_network(power)` | adjacency, context TOM | `power` | `.adjacency`, `.tom` |
-| `find_modules(min_module_size, deep_split)` | hard modules | `min_module_size=30`, `deep_split=2` | `.modules`, `.linkage` |
-| `split_modules(t_thr, jaccard_cut, ...)` | overlapping submodules | see below | `.submodules`, `.memberships` |
-| `run(power, min_module_size, deep_split)` | `compute_support` → `build_network` → `find_modules` | | |
-| `module_context_profile()`, `module_context_coherence()`, `context_eigengenes(module, contexts)`, `membership_matrix()` | interpretation (section 6) | | |
+| [`ContextWGCNA(data, obs, ...)`](#51-the-constructor) | everything in 5.1 | | `.data`, `.obs`, `.blocks`, `.preprocessing` |
+| [`compute_support()`](#52-compute_support) | none | `similarity`, `top_n`, `weighting`, `calibrate`, `n_perm`, `selection`, `store_context_t`, `store_max_mb`, `seed`, `chunk_mb` | `.support` |
+| [`pick_power(powers, r2_cut, mean_cut)`](#53-pick_power) | `powers`, `r2_cut`, `mean_cut` | `network_type` | `.sft`, `.power` |
+| [`build_network(power)`](#54-build_network) | `power` | `network_type`, `tom_mode`, `support_min_t` | `.adjacency`, `.tom` |
+| [`find_modules(min_module_size, deep_split, ...)`](#55-find_modules) | `min_module_size`, `deep_split`, tree-cut options | | `.modules`, `.linkage` |
+| [`split_modules(t_thr, ...)`](#56-split_modules) | `t_thr`, `min_size`, `min_partners`, `jaccard_cut`, `min_context_frac`, `dedup_jaccard` | `selection` | `.submodules`, `.memberships` |
+| [`run(power, min_module_size, deep_split)`](#57-run) | as in the three steps it runs | | |
+| [interpretation methods](#58-interpretation-methods) | see 5.8 | | |
+| [`global_wgcna(data, ...)`](#59-global_wgcna) | a separate function, see 5.9 | | |
 
-`global_wgcna(data, power, min_module_size, ...)` is the pooled baseline; it takes `similarity`,
-`network_type`, `deep_split`, `r2_cut`, `mean_cut`, `layer`, `genes`, `nan`, `clip` and `max_abs`
-as here, and returns (module labels, power).
+### 5.1 The constructor
 
-### Contexts — `ContextWGCNA(...)`
-| Parameter | Default | Meaning / when to change |
-|---|---|---|
-| `data` / `obs` | | The data (LFC or expression): a DataFrame plus observation table, or an AnnData object (then `obs` defaults to `adata.obs`). |
-| `layer` | `None` | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
-| `genes` | `None` (all) | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
-| `nan` | `"raise"` | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
-| `max_abs` | `"auto"` | Treat \|value\| > `max_abs` as missing (GLM LFCs of ~30 from zero counts): `"auto"` takes the cutoff from a separate, scattered cluster of large values (none: nothing masked), a number (e.g. 15) fixes it, `None` turns it off; set to 0 (or to `nan` if it is a number), before clipping. |
-| `max_artifact_z` | `None` | Leave out rows with unusually many masked genes for their context (`artifact_z` > this, e.g. 3; see section 4). |
-| `clip` | `None` | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. `.data` holds the clipped data, `.preprocessing` what was done. |
-| `context_col` | `"system"` | Column of `obs` that defines contexts. |
-| `contexts` | `None` (all) | List of context names to use, e.g. to exclude a system. |
-| `min_obs` | `10` | Contexts with fewer observations are dropped (must be ≥ 4). Raise it for condition contexts if correlations look noisy. |
+Grouped by topic; pass them by name.
 
-Input checks when the contexts are built: row (observation) and column (gene) labels must be unique,
-`obs` must contain every row of `data` (it is reordered to match), and `data` must not contain NaN
-(unless `nan=` says how to handle it) or infinite values (unless they are clipped). Each raises a
-`ValueError` naming the problem.
+```python
+ContextWGCNA(data, obs=None, context_col="system", contexts=None, min_obs=10,
+             layer=None, genes=None, nan="raise", max_abs="auto", max_artifact_z=None, clip=None,
+             similarity="pearson", top_n=3, weighting="n", calibrate="analytic", n_perm=10,
+             selection=None, store_context_t="auto", store_max_mb=2048,
+             network_type="signed", tom_mode="matched", support_min_t=None,
+             seed=0, chunk_mb=128)
+```
 
-### Similarity
-| Parameter | Default | Meaning / when to change |
-|---|---|---|
-| `similarity` | `"pearson"` | `pearson`: co-variation around each context's mean. `spearman`: rank-based, robust to outliers. `bicor`: biweight midcorrelation (WGCNA's robust choice). `cosine`: **uncentred**, so it also rewards genes that move in the same direction relative to LFC = 0 (e.g. both up across a whole system). With `cosine`, use `calibrate="permutation"`. |
+| Parameter | Default | Used by | Meaning / when to change |
+|---|---|---|---|
+| **Input** | | | |
+| `data` / `obs` | | constructor | The data (LFC or expression): a DataFrame plus observation table, or an AnnData object (then `obs` defaults to `adata.obs`). |
+| `layer` | `None` | constructor | AnnData only: use `adata.layers[layer]` instead of `adata.X`. |
+| `genes` | `None` (all) | constructor | Gene subset: list of names, or (AnnData) a boolean `adata.var` column name. |
+| **Value preparation** (section 3) | | | |
+| `nan` | `"raise"` | constructor | Missing values: `"raise"`; `"skip"` drops rows that are entirely NaN (partly-NaN rows still raise); a number fills NaN with it. |
+| `max_abs` | `"auto"` | constructor | Treat \|value\| > `max_abs` as missing (GLM LFCs of ~30 from zero counts): `"auto"` takes the cutoff from a separate, scattered cluster of large values (none: nothing masked), a number (e.g. 15) fixes it, `None` turns it off. Masked values are set to 0 (or to `nan` if it is a number), before clipping. |
+| `max_artifact_z` | `None` | constructor | Leave out rows with unusually many masked genes for their context (`artifact_z` > this, e.g. 3). |
+| `clip` | `None` | constructor | Clip values before the correlations: `c` → [−c, c]; `(lo, hi)`; `"p95"` (any `"pNN"`) → ± that percentile of \|LFC\|. |
+| **Contexts** | | | |
+| `context_col` | `"system"` | constructor | Column of `obs` that defines contexts. |
+| `contexts` | `None` (all) | constructor | List of context names to use, e.g. to exclude a system. |
+| `min_obs` | `10` | constructor | Contexts with fewer observations are dropped (must be ≥ 4). Raise it for condition contexts if correlations look noisy. |
+| **Similarity** | | | |
+| `similarity` | `"pearson"` | `compute_support` | `pearson`: co-variation around each context's mean. `spearman`: rank-based, robust to outliers. `bicor`: biweight midcorrelation (WGCNA's robust choice). `cosine`: **uncentred**, so it also rewards genes that move in the same direction relative to LFC = 0 (e.g. both up across a whole system). With `cosine`, use `calibrate="permutation"`. |
+| **Context support (top-n union)** | | | |
+| `top_n` | `3` | `compute_support` | Number of best contexts summarized per pair. This sets the **minimum breadth of support** for an edge: `top_n=1` means "strong in any single context" and is noisiest; `2`–`3` is recommended. With K contexts, `top_n ≈ K` approaches ordinary pooled correlation. |
+| `weighting` | `"n"` | `compute_support` | Weight of each selected context in the summary: `n` = by n_obs − 3 (pooled Fisher z); `equal` = plain mean. |
+| `calibrate` | `"analytic"` | `compute_support` | Removes the optimism of picking the best n of K. `analytic` assumes independent contexts and that t = z·√(n_c−3) is standard normal under the null: exact in large samples for pearson, an approximation for spearman/bicor (use `permutation` there when the exact null matters); fast. `permutation` permutes each gene within each context `n_perm` times; required for `cosine`, and safer if contexts are strongly dependent. `none` skips it. |
+| `n_perm` | `10` | `compute_support` | Permutations for `calibrate="permutation"`. |
+| `selection` | follows `network_type` | `compute_support`, `split_modules` | `positive` (rank by signed t) for signed networks; `absolute` (\|t\|) for unsigned. Set only to override. |
+| `store_context_t` / `store_max_mb` | `"auto"` / `2048` | `compute_support` | Keep all per-context statistics (K × G² × 4 bytes) for soft context weights and module splitting. If they exceed `store_max_mb`, they are recomputed for module genes when needed (slower, same result). |
+| **Network** | | | |
+| `network_type` | `"signed"` | `pick_power`, `build_network` | `signed`: a = ((1 + r)/2)^β; negatively correlated genes are disconnected. `signed hybrid`: a = r^β for r > 0, else 0. `unsigned`: a = \|r\|^β; positively and negatively correlated genes can share a module. |
+| `tom_mode` | `"matched"` | `build_network` | `matched`: a shared neighbour u counts for (i, j) only if i–u, u–j **and** i–j share a supporting context. `shared`: i–u and u–j must share a context. `standard`: ordinary WGCNA TOM (context-blind). |
+| `support_min_t` | `None` | `build_network`, `module_context_profile(soft=False)` | Optionally count a top-n context as "supporting" a pair only if its t ≥ this value. |
+| **Performance** | | | |
+| `seed` | `0` | `compute_support` | For permutation / Monte-Carlo calibration. |
+| `chunk_mb` | `128` | `compute_support` | Memory per chunk while streaming over contexts. |
 
-### Context support (top-n union)
-| Parameter | Default | Meaning / when to change |
-|---|---|---|
-| `top_n` | `3` | Number of best contexts summarized per pair. This sets the **minimum breadth of support** for an edge: `top_n=1` means "strong in any single context" and is noisiest; `2`–`3` is recommended. With K contexts, `top_n ≈ K` approaches ordinary pooled correlation. |
-| `weighting` | `"n"` | Weight of each selected context in the summary: `n` = by n_obs − 3 (pooled Fisher z); `equal` = plain mean. |
-| `calibrate` | `"analytic"` | Removes the optimism of picking the best n of K: `analytic` assumes independent contexts and that t = z·√(n_c−3) is standard normal under the null: exact in large samples for pearson, an approximation for spearman/bicor (use `permutation` there when the exact null matters); fast. `permutation` permutes each gene within each context `n_perm` times; required for `cosine`, and safer if contexts are strongly dependent. `none` skips it. |
-| `n_perm` | `10` | Permutations for `calibrate="permutation"`. |
-| `selection` | auto | `positive` (rank by signed t = z·√(n_c−3)) for signed networks; `absolute` for unsigned. Set only to override. |
-| `store_context_t` / `store_max_mb` | `"auto"` / `2048` | Keep all per-context statistics (K × G² × 4 bytes) for soft context weights and module splitting. If they exceed `store_max_mb`, they are recomputed for module genes when needed (slower, same result). |
+The settings in rows used by a later step can be changed on the object (`cw.top_n = 2`) before
+re-running it ([Re-running a step](#re-running-a-step)); the input, value-preparation and context
+settings need a new object.
+
+Input checks: row (observation) and column (gene) labels must be unique, `obs` must contain every
+row of `data` (it is reordered to match), and `data` must not contain NaN (unless `nan=` says how to
+handle it) or infinite values (unless they are clipped). Each raises a `ValueError` naming the
+problem.
+
+### 5.2 `compute_support()`
+
+No arguments: it uses the constructor's similarity and context-support settings. Returns and sets
+`cw.support`, which holds the summary similarity `.r`, the calibration `.bias`, and per pair
+`.pair(a, b)` / `.pair_profile(a, b)`.
 
 How big is the calibration? `cw.support.bias` is the amount subtracted (Fisher z). For 20
 contexts × 300 observations with `top_n=3` it is about 0.085 (r ≈ 0.085): small. For 300
 contexts × 20 observations it is large (z ≈ 0.63, r ≈ 0.56). There calibration is essential.
 
-### Network
-| Parameter | Default | Meaning / when to change |
+### 5.3 `pick_power()`
+
+```python
+cw.pick_power(powers=None, r2_cut=0.85, mean_cut=100)
+```
+
+| Parameter | Default | Meaning |
 |---|---|---|
-| `network_type` | `"signed"` | `signed`: a = ((1 + r)/2)^β; negatively correlated genes are disconnected. `signed hybrid`: a = r^β for r > 0, else 0. `unsigned`: a = \|r\|^β; positively and negatively correlated genes can share a module. |
-| `power` (β) | scale-free pick | See "Choosing the power". |
-| `tom_mode` | `"matched"` | `matched`: a shared neighbour u counts for (i, j) only if i–u, u–j **and** i–j share a supporting context. `shared`: i–u and u–j must share a context. `standard`: ordinary WGCNA TOM (context-blind). |
-| `support_min_t` | `None` | Optionally count a top-n context as "supporting" (in the TOM and in `module_context_profile(soft=False)`) only if its t ≥ this value. |
+| `powers` | `None` | Candidate powers (`None`: `ctxwgcna.network.DEFAULT_POWERS`). |
+| `r2_cut` | `0.85` | Required scale-free fit (signed R²). |
+| `mean_cut` | `100` | Maximum mean connectivity. |
+
+Returns the fit table (also `cw.sft`) and sets `cw.power` to the lowest power that meets both
+cuts (or the best-fitting one, with a message, if none does).
 
 #### Choosing the power
-`pick_power(powers=None, r2_cut=0.85, mean_cut=100)` returns the lowest power whose scale-free fit
-(signed R²) is ≥ `r2_cut` with mean connectivity ≤ `mean_cut`. Treat it as a starting point:
+Treat the automatic pick as a starting point:
 - A **signed** network maps r = 0 to 0.5^β, so it needs higher powers than unsigned (WGCNA's usual
   advice: about 12–20 for signed).
 - In the simulations the automatic pick (9) gave clearly worse modules than 12. Inspect `cw.sft`
   and compare modules at 2–3 powers (e.g. 8, 12, 16). Trust structure that is stable across them.
 
-### Hard modules — `find_modules(...)`
+### 5.4 `build_network()`
+
+```python
+cw.build_network(power=None)
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `power` (β) | `None` | Soft-threshold power. `None`: the one already in `cw.power`, else picked by `pick_power()`. |
+
+Uses the constructor's `network_type`, `tom_mode` and `support_min_t`. Sets `cw.adjacency` and
+`cw.tom`.
+
+### 5.5 `find_modules()`
+
+```python
+cw.find_modules(min_module_size=30, deep_split=2, **cutree_kwargs)
+```
+
 | Parameter | Default | Meaning / when to change |
 |---|---|---|
 | `min_module_size` | `30` | Smallest module. Also the default minimum submodule size. With about 1,000 genes, 20–30 is reasonable. |
 | `deep_split` | `2` | 0–4. Higher values split the dendrogram more finely (more, smaller modules). |
 | `**cutree_kwargs` | | Passed to `dynamicTreeCut.cutreeHybrid` (e.g. `cutHeight`, `maxCoreScatter`). `pamStage` is forced off by default (the port's PAM stage is broken). |
 
-### Overlapping submodules — `split_modules(...)`
+Returns and sets `cw.modules` (gene → `M1`, `M2`, …; `M0` = unassigned); `cw.linkage` holds the
+gene dendrogram.
+
+### 5.6 `split_modules()`
+
+```python
+cw.split_modules(t_thr=3.0, min_size=None, min_partners=None, jaccard_cut=0.5,
+                 min_context_frac=0.5, dedup_jaccard=0.8)
+```
+
 For each hard module and each context, a gene is **active** if it has ≥ `min_partners`
 significantly correlated partners inside the module in that context (single-context
 t ≥ `t_thr`). Contexts that activate similar gene sets are grouped. Each group becomes a
@@ -695,7 +756,7 @@ belongs to several submodules.
 | Parameter | Default | Meaning / when to change |
 |---|---|---|
 | `t_thr` | `3.0` | Edge significance within one context, as t = arctanh(r)·√(n − 3). The same `t_thr` means a different r depending on n (table below). Raise it for stricter, smaller submodules. |
-| `min_size` | `min_module_size` | Smallest submodule; also how many active genes a context needs to count for the module. |
+| `min_size` | `min_module_size` of `find_modules` | Smallest submodule; also how many active genes a context needs to count for the module. |
 | `min_partners` | ⌈min_size / 2⌉ | Significant partners a gene needs inside the module to be active in a context. |
 | `jaccard_cut` | `0.5` | Contexts whose active gene sets overlap at least this much (Jaccard, average linkage) form one group. **Lower = fewer, broader submodules**; higher = more context-specific splits. |
 | `min_context_frac` | `0.5` | A gene joins a submodule if active in at least this fraction of the group's contexts. |
@@ -707,6 +768,8 @@ belongs to several submodules.
 | 100 | 0.30 |
 | 20 (condition contexts) | 0.62 |
 
+Returns `(submodules, memberships)`, also stored as `cw.submodules` and `cw.memberships`.
+
 Columns of `submodules`: `parent`, `contexts` (comma-separated), `n_contexts`, `n_genes`,
 `n_overlap` (genes also in another submodule of the same parent), `parent_size`,
 `parent_unplaced` (parent genes in no submodule). A module that doesn't need splitting
@@ -716,13 +779,44 @@ Columns of `memberships`: `gene`, `submodule`, `parent`, `frac_contexts` (share 
 submodule's contexts in which the gene is active), `mean_t` (mean single-context z of the gene with
 the other submodule members, over the submodule's contexts; a membership strength).
 
-### Performance
-| Parameter | Default | Meaning |
-|---|---|---|
-| `chunk_mb` | `128` | Memory per chunk while streaming over contexts. |
-| `seed` | `0` | For permutation / Monte-Carlo calibration. |
+### 5.7 `run()`
 
-### Lower-level functions
+```python
+cw.run(power=None, min_module_size=30, deep_split=2, **cutree_kwargs)
+```
+
+`compute_support()` → `build_network(power)` (power picked if `None`) →
+`find_modules(min_module_size, deep_split, **cutree_kwargs)`; returns the modules. It does not
+split them: call `split_modules()` afterwards.
+
+### 5.8 Interpretation methods
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `cw.module_context_profile(soft=True)` | `soft=False`: share of top-n supporting contexts instead of soft weights | modules × contexts, rows sum to 1 |
+| `cw.module_context_coherence()` | | modules × contexts: mean within-module similarity in each context |
+| `cw.context_eigengenes(module, contexts=None)` | a module label; optional list of contexts | `{context: (eigengene Series, variance explained)}` |
+| `cw.membership_matrix()` | | genes × submodules (bool), after `split_modules()` |
+| `cw.support.pair_profile(a, b)` | two gene names | the pair's similarity and weight in every context (needs stored per-context t) |
+| `cw.support.pair(a, b)` | two gene names | its top-n contexts with signed `t` and `rank_stat` |
+
+See section 6 for how to read them.
+
+### 5.9 `global_wgcna()`
+
+A separate function (not a method): standard WGCNA on the pooled data, as a baseline.
+
+```python
+modules, power = global_wgcna(data, similarity="pearson", network_type="signed", power=None,
+                              powers=None, min_module_size=30, deep_split=2, r2_cut=0.85,
+                              mean_cut=100, layer=None, genes=None, nan="raise", clip=None,
+                              max_abs="auto")
+```
+
+The arguments mean the same as in 5.1, 5.3 and 5.5 (`power=None`: scale-free pick). There is no
+`obs`: all rows are pooled. See [Standard WGCNA](#standard-wgcna).
+
+### 5.10 Lower-level functions
 The steps are also available as plain functions, e.g. for custom pipelines:
 
 | Function | Module | What it does |
@@ -871,7 +965,7 @@ For context c with n_c observations and similarity s_c(i, j):
 - Modules: average-linkage clustering of 1 − TOM, then dynamic hybrid tree cut.
 - Soft context weight of an edge: w_ij^k = t_k⁺ / Σ_k t_k⁺ (|t_k| for unsigned networks). This is flat
   for globally co-expressed pairs and peaked for local ones.
-- Submodules: see section 5.
+- Submodules: see section 5.6.
 
 ---
 
@@ -886,7 +980,7 @@ For context c with n_c observations and similarity s_c(i, j):
 - **No module merging step.** Standard WGCNA merges modules with correlated pooled eigengenes,
   which would wrongly merge or miss local modules, so it is not applied.
 - **No PAM stage.** Unassigned genes are not reassigned to the nearest module.
-- **Automatic power** can be suboptimal (section 5); check several powers.
+- **Automatic power** can be suboptimal (section 5.3); check several powers.
 - **Validation** so far is on simulated data only.
 
 ---
